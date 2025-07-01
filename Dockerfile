@@ -142,15 +142,11 @@ ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 ### NIXL setup ###
 
 WORKDIR /opt
-RUN mkdir -p /opt/nixl
-WORKDIR /opt/nixl
 
-ARG NIXL_VERSION="0.1.1"
-
-RUN wget "https://github.com/ai-dynamo/nixl/archive/refs/tags/${NIXL_VERSION}.tar.gz"
-RUN tar --strip-components=1 -zxvf ${NIXL_VERSION}.tar.gz && rm ${NIXL_VERSION}.tar.gz
-
-RUN mkdir build && \
+ENV NIXL_SHA=28bc7352ae9dbd664eab6b94bcfe59bc65ec26c8
+RUN git clone https://github.com/robertgshaw2-redhat/nixl.git
+RUN cd nixl && git checkout ${NIXL_SHA} && \
+    mkdir build && \
     meson setup build/ --prefix=/usr/local/nixl && \
     cd build && \
     ninja && \
@@ -171,34 +167,13 @@ RUN mkdir -p /workspace/tmp
 # Clean up unnecessary files to free up space
 RUN rm -rf /usr/local/src/* /opt/nixl/build /workspace/gdrcopy /root/.cache /tmp/* /var/tmp/*
 
-# Git clone repos
+WORKDIR /workspace/
+# ENV VLLM_BRANCH=launch-timing-debug
+ENV VLLM_BRANCH=nixl-perf-debugging
+RUN git clone -b ${VLLM_BRANCH} https://github.com/robertgshaw2-redhat/vllm.git
 
-# Env to force rebuilding all layers below
-ENV LMCACHE_COMMIT_SHA=c1563bc9c72ea0d71156a3d9a6cd643170828acf
-ENV VLLM_COMMIT_SHA=db9a82dd8b7b85af3d0a6956bae92e1a5d986413
-
-WORKDIR /workspace
-RUN git clone https://github.com/neuralmagic/LMCache.git && \
-    cd LMCache && \
-    git checkout -q $LMCACHE_COMMIT_SHA && \
-    cd ..
-
-RUN git clone -b pd-launch-branch https://github.com/neuralmagic/vllm.git && \
-    cd vllm && \
-    git checkout -q $VLLM_COMMIT_SHA && \
-    cd ..
-
-# Set up Python virtual environment with uv
 WORKDIR /workspace/vllm
 RUN uv venv .vllm --python 3.12
-
-# Supported archs
-ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX;9.0+PTX"
-
-# Install core dependencies (Torch first)
-RUN . .vllm/bin/activate && \
-    uv pip install --upgrade pip && \
-    uv pip install torch==2.7.0
 
 # Install vllm editable
 RUN . .vllm/bin/activate && \
@@ -206,12 +181,8 @@ RUN . .vllm/bin/activate && \
     VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl \
     VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 
-# Install related packages and cleanup
-RUN . .vllm/bin/activate && \
-    uv pip install ../LMCache/ && \
-    uv pip install nixl && \
-    uv cache clean && \
-    rm -rf .git ../LMCache
+ENV VLLM_COMMIT_SHA=56939c835d42accacd6cab7c4fbba9b13d62c5fc
+RUN git fetch && git checkout ${VLLM_COMMIT_SHA}
 
 # Final environment setup
 ENV PATH="/workspace/vllm/.vllm/bin:${PATH}"
