@@ -17,12 +17,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 USER root
 
-### NIXL Dependencies setup ###
+### NIXL Dependencies ###
 
 ARG MOFED_VERSION=24.10-1.1.4.0
 ARG PYTHON_VERSION=3.12
-ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_1/
-ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
 
 RUN --mount=type=cache,target=/var/cache/apt \
     --mount=type=cache,target=/var/lib/apt \
@@ -80,9 +78,6 @@ RUN --mount=type=cache,target=/var/cache/apt \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN wget ${NSYS_URL}${NSYS_PKG} &&\
-    apt install -y ./${NSYS_PKG} &&\
-    rm ${NSYS_PKG}
 
 RUN cd /usr/local/src && \
     curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
@@ -143,7 +138,7 @@ ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 
 WORKDIR /opt
 
-ENV NIXL_SHA=28bc7352ae9dbd664eab6b94bcfe59bc65ec26c8
+ENV NIXL_SHA=0704dc0217a57da95187291968c0a6022d912387
 RUN git clone https://github.com/robertgshaw2-redhat/nixl.git
 RUN cd nixl && git checkout ${NIXL_SHA} && \
     mkdir build && \
@@ -168,9 +163,10 @@ RUN mkdir -p /workspace/tmp
 RUN rm -rf /usr/local/src/* /opt/nixl/build /workspace/gdrcopy /root/.cache /tmp/* /var/tmp/*
 
 WORKDIR /workspace/
-# ENV VLLM_BRANCH=launch-timing-debug
-ENV VLLM_BRANCH=nixl-perf-debugging
-RUN git clone -b ${VLLM_BRANCH} https://github.com/robertgshaw2-redhat/vllm.git
+ENV VLLM_BRANCH_SHA=3c6fd286b40ada67bba98216ed410bb3a0d38b16
+RUN git clone https://github.com/robertgshaw2-redhat/vllm.git && \
+    cd vllm && \
+    git checkout ${VLLM_BRANCH_SHA}
 
 WORKDIR /workspace/vllm
 RUN uv venv .vllm --python 3.12
