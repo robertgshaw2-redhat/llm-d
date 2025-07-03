@@ -138,8 +138,8 @@ ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 
 WORKDIR /opt
 
-ENV NIXL_SHA=0704dc0217a57da95187291968c0a6022d912387
 RUN git clone https://github.com/robertgshaw2-redhat/nixl.git
+ENV NIXL_SHA=0704dc0217a57da95187291968c0a6022d912387
 RUN cd nixl && git checkout ${NIXL_SHA} && \
     mkdir build && \
     meson setup build/ --prefix=/usr/local/nixl && \
@@ -177,7 +177,7 @@ RUN . .vllm/bin/activate && \
     VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl \
     VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 
-ENV VLLM_COMMIT_SHA=56939c835d42accacd6cab7c4fbba9b13d62c5fc
+ENV VLLM_COMMIT_SHA=3c6fd286b40ada67bba98216ed410bb3a0d38b16
 RUN git fetch && git checkout ${VLLM_COMMIT_SHA}
 
 # Final environment setup
