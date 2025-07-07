@@ -171,12 +171,14 @@ RUN git clone https://github.com/robertgshaw2-redhat/vllm.git && \
 WORKDIR /workspace/vllm
 RUN uv venv .vllm --python 3.12
 
-# Install vllm editable
+# Install VLLM.
+# Run the following: git merge-base HEAD origin/main
+ENV VLLM_WHL_COMMIT=536fd330036b0406786c847f68e4f67cba06f421
+ENV VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_WHL_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 RUN . .vllm/bin/activate && \
-    VLLM_COMMIT=$(git merge-base HEAD origin/main) \
-    VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl \
-    VLLM_USE_PRECOMPILED=1 uv pip install --editable .
+  VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 
+# For quick changes to avoid re-uploading too many layers.
 ENV VLLM_COMMIT_SHA=3c6fd286b40ada67bba98216ed410bb3a0d38b16
 RUN git fetch && git checkout ${VLLM_COMMIT_SHA}
 
