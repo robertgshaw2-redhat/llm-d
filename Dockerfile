@@ -139,8 +139,8 @@ ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
 WORKDIR /opt
 
 RUN git clone https://github.com/robertgshaw2-redhat/nixl.git
-ENV NIXL_SHA=0704dc0217a57da95187291968c0a6022d912387
-RUN cd nixl && git checkout ${NIXL_SHA} && \
+ENV NIXL_SHA=f865ce771cc5db4379f1a9e7c379183b4a15bd62
+RUN cd nixl && git fetch && git checkout ${NIXL_SHA} && \
     mkdir build && \
     meson setup build/ --prefix=/usr/local/nixl && \
     cd build && \
@@ -163,8 +163,8 @@ RUN mkdir -p /workspace/tmp
 RUN rm -rf /usr/local/src/* /opt/nixl/build /workspace/gdrcopy /root/.cache /tmp/* /var/tmp/*
 
 WORKDIR /workspace/
-ENV VLLM_BRANCH_SHA=3c6fd286b40ada67bba98216ed410bb3a0d38b16
-RUN git clone https://github.com/robertgshaw2-redhat/vllm.git && \
+ENV VLLM_BRANCH_SHA=7fbcbbfc45ae21cc9cdb0838ae35837e9f2afb0d
+RUN git clone https://github.com/vllm-project/vllm.git && \
     cd vllm && \
     git checkout ${VLLM_BRANCH_SHA}
 
@@ -173,13 +173,13 @@ RUN uv venv .vllm --python 3.12
 
 # Install VLLM.
 # Run the following: git merge-base HEAD origin/main
-ENV VLLM_WHL_COMMIT=536fd330036b0406786c847f68e4f67cba06f421
+ENV VLLM_WHL_COMMIT=dac8cc49f43f7d2639d873532a408949169821a9
 ENV VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_WHL_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 RUN . .vllm/bin/activate && \
   VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 
 # For quick changes to avoid re-uploading too many layers.
-ENV VLLM_COMMIT_SHA=3c6fd286b40ada67bba98216ed410bb3a0d38b16
+ENV VLLM_COMMIT_SHA=f65450e3dc9541eb311b8dd559b6460184864784
 RUN git fetch && git checkout ${VLLM_COMMIT_SHA}
 
 # Final environment setup
