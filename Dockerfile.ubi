@@ -7,7 +7,7 @@ WORKDIR /workspace
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     UV_LINK_MODE=copy \
-    TORCH_CUDA_ARCH_LIST="9.0;10.0+PTX" \
+    TORCH_CUDA_ARCH_LIST="9.0" \
     PYTHON_VERSION=${PYTHON_VERSION:-3.12} \
     UV_TORCH_BACKEND=${UV_TORCH_BACKEND:-cu128} \
     VIRTUAL_ENV=/opt/vllm 
@@ -90,8 +90,8 @@ RUN --mount=type=cache,target=/var/cache/git \
     ldconfig && \
     cd .. && rm -rf ucx
 
-ARG NIXL_REPO_URL="https://github.com/ai-dynamo/nixl.git"
-ARG NIXL_COMMIT_SHA="0.4.0"
+ARG NIXL_REPO_URL="https://github.com/iyastreb/nixl.git"
+ARG NIXL_COMMIT_SHA="4b6301453ff10b44fbdca12e6dca12c2e5c6aff1"
 RUN --mount=type=cache,target=/tmp/nixl-cache \
     ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib64/ && \
     mkdir /opt/nixl && cd /opt/nixl && \
@@ -120,7 +120,7 @@ WORKDIR /workspace
 
 # Define commit SHAs as build args to avoid layer invalidation
 ARG LMCACHE_COMMIT_SHA=c1563bc9c72ea0d71156a3d9a6cd643170828acf
-ARG VLLM_COMMIT_SHA=66f6fbd393721c98440436ab067304ac4331219c
+ARG VLLM_COMMIT_SHA=723263fa2372bffe78ae976c83c832d015d66097
 
 # Clone repositories with cache mounts
 RUN --mount=type=cache,target=/var/cache/git \
