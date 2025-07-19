@@ -338,17 +338,18 @@ RUN --mount=type=cache,target=/var/cache/git \
     # Cleanup (keep /tmp/vllm-${VLLM_COMMIT_SHA} for editable install)
     rm -rf /tmp/wheels
 
+ENV NEW_SHA=c130e8edeaa2ab9fbd5dba802bdc3d7be0c4dedc
+RUN cd /tmp/vllm-${VLLM_COMMIT_SHA} && git fetch && git checkout ${NEW_SHA}
+
 RUN dnf autoremove -y && dnf clean all
 
-# # setup non-root user for OpenShift
-# RUN umask 002 && \
-#     useradd --uid 2000 --gid 0 vllm && \
-#     rm -rf /home/vllm && \
-#     mkdir -p /home/vllm && \
-#     chown vllm:root /home/vllm && \
-#     chown vllm:root /tmp/vllm-${VLLM_COMMIT_SHA}/* && \
-#     chmod g+rwx /home/vllm && \
-#     chmod g+rwx /tmp/vllm-${VLLM_COMMIT_SHA}/*
+# setup non-root user for OpenShift
+RUN umask 002 && \
+    useradd --uid 2000 --gid 0 vllm && \
+    rm -rf /home/vllm && \
+    mkdir -p /home/vllm && \
+    chown vllm:root /home/vllm && \
+    chmod g+rwx /home/vllm
 
 
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}" \
@@ -367,11 +368,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}" \
     # in a future release when we get to the bottom of the issue.
     HF_HUB_DISABLE_XET=1
 
-
-RUN NEW_SHA=ca3156dffcfacac77cccf9ad64f3bdaf36d1f13b
-
-RUN cd /tmp/vllm-${VLLM_COMMIT_SHA} && \
-    git fetch && git checkout ${NEW_SHA}
+USER 2000
 
 WORKDIR /home/vllm/
 
