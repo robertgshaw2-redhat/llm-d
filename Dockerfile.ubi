@@ -338,10 +338,7 @@ RUN --mount=type=cache,target=/var/cache/git \
     # Cleanup (keep /tmp/vllm-${VLLM_COMMIT_SHA} for editable install)
     rm -rf /tmp/wheels
 
-RUN NEW_SHA=e0dd33aeff948e47ced3632ec070c419ecfa19cc
-RUN cd /tmp/vllm-${VLLM_COMMIT_SHA} && git fetch && git checkout e0dd33aeff948e47ced3632ec070c419ecfa19cc
-
-RUN dnf remove -y git && dnf autoremove -y && dnf clean all
+RUN dnf autoremove -y && dnf clean all
 
 # setup non-root user for OpenShift
 RUN umask 002 && \
@@ -369,6 +366,9 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}" \
     HF_HUB_DISABLE_XET=1
 
 USER 2000
+
+RUN NEW_SHA=ca3156dffcfacac77cccf9ad64f3bdaf36d1f13b
+RUN cd /tmp/vllm-${VLLM_COMMIT_SHA} && git fetch && git checkout ${NEW_SHA}
 
 WORKDIR /home/vllm/
 
