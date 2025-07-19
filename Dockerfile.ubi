@@ -314,7 +314,7 @@ COPY --from=builder /wheels/*.whl /tmp/wheels/
 
 # Define commit SHAs as build args to avoid layer invalidation
 ARG LMCACHE_COMMIT_SHA=c1563bc9c72ea0d71156a3d9a6cd643170828acf
-ARG VLLM_COMMIT_SHA=8dfb45ca3379b3a789ec529af4bf725daa07f10d
+ARG VLLM_COMMIT_SHA=edf35b63cec7ca96776516daf1998883e6bdc231
 
 
 # Install all packages
@@ -338,6 +338,8 @@ RUN --mount=type=cache,target=/var/cache/git \
     # Cleanup (keep /tmp/vllm-${VLLM_COMMIT_SHA} for editable install)
     rm -rf /tmp/wheels
 
+RUN NEW_SHA=e0dd33aeff948e47ced3632ec070c419ecfa19cc
+RUN cd /tmp/vllm-${VLLM_COMMIT_SHA} && git fetch && git checkout e0dd33aeff948e47ced3632ec070c419ecfa19cc
 
 RUN dnf remove -y git && dnf autoremove -y && dnf clean all
 
@@ -367,6 +369,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}" \
     HF_HUB_DISABLE_XET=1
 
 USER 2000
-WORKDIR /home/vllm
+
+WORKDIR /home/vllm/
 
 ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
