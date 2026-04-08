@@ -122,14 +122,145 @@ Picker plugins make the final endpoint selection based on the aggregated scores.
 
 ### Flow Control
 
-Flow control is an optional feature that prevents backend overload by buffering requests at the gateway when model servers are saturated. Without flow control, the EPP always routes immediately to the best available endpoint, even if all endpoints are under heavy load.
+Flow control is an optional feature that prevents backend overload by shifting intelligent queuing from model servers into the EPP gateway layer. Without flow control, the EPP always routes immediately to the best available endpoint, even if all endpoints are under heavy load -- pushing backpressure into model server queues where the EPP has no visibility or control.
 
-When flow control is enabled:
+When flow control is enabled, the EPP acts as a centralized admission controller for the entire `InferencePool`, buffering excess requests and dispatching them only when backends have capacity.
 
-1. The EPP monitors backend saturation using configurable thresholds.
-2. If all endpoints are saturated, incoming requests are queued at the gateway rather than being immediately dispatched.
-3. As endpoints become available, queued requests are released in order.
-4. Queue depth is exposed via the `inference_extension_flow_control_queue_size` Prometheus metric, which can drive HPA-based autoscaling.
+#### Architecture
+
+Flow control consists of two cooperating subsystems:
+
+```
+                    ┌─────────────────────────────────────────────────────┐
+                    │                  Flow Control Layer                  │
+                    │                                                     │
+  Incoming Request  │  ┌─────────────┐        ┌────────────────────────┐ │
+  ─────────────────►│  │  Assign     │        │  Central Request       │ │
+                    │  │  FlowKey    │───────►│  Buffer                │ │
+                    │  │ (priority + │        │                        │ │
+                    │  │  fairness)  │        │  ┌───────────────────┐ │ │
+                    │  └─────────────┘        │  │ Priority 0 (high) │ │ │
+                    │                         │  ├───────────────────┤ │ │
+                    │                         │  │ Priority 1        │ │ │
+                    │                         │  ├───────────────────┤ │ │
+                    │                         │  │ Priority N (low)  │ │ │
+                    │                         │  └───────────────────┘ │ │
+                    │                         └───────────┬────────────┘ │
+                    │                                     │              │
+                    │  ┌──────────────────┐    dispatch   │              │
+                    │  │   Saturation     │◄──── check ───┘              │
+                    │  │   Detector       │                              │
+                    │  │                  │── capacity ──►  Route to     │
+                    │  │ (pool health     │   available     Endpoint     │
+                    │  │  monitoring)     │                              │
+                    │  └──────────────────┘                              │
+                    └─────────────────────────────────────────────────────┘
+```
+
+**Central Request Buffer** -- Holds incoming requests in priority-ordered queues within the EPP rather than forwarding them directly to model server queues. Each request is assigned a `FlowKey` containing a priority level and a fairness identifier.
+
+**Saturation Detector** -- Continuously monitors the aggregate health of the `InferencePool` (KV-cache utilization, queue depths across endpoints) and gates dispatch decisions. Requests are only released to the scheduling pipeline when the detector confirms available capacity.
+
+#### Request Lifecycle
+
+1. **FlowKey Assignment** -- Each incoming request is assigned a `FlowKey` with two components:
+   - **Fairness ID**: Extracted from the `x-gateway-inference-fairness-id` HTTP header. If absent, the request is assigned to a global default bucket.
+   - **Priority**: An integer value where lower numbers indicate higher priority. Negative values are permitted for background/batch traffic.
+
+2. **Enqueue** -- The request is placed into the appropriate priority queue in the central buffer. The requesting goroutine blocks, waiting for a dispatch signal.
+
+3. **Policy Evaluation** -- Background dispatch workers continuously evaluate which request to release next using a two-level policy:
+   - **Strict Priority**: All buffered requests from higher-priority queues are dispatched before any lower-priority requests are considered.
+   - **Intra-Priority Fairness**: Within the same priority level, requests are distributed equitably across fairness IDs during contention. The system is work-conserving -- it does not artificially throttle if GPUs have spare capacity.
+
+4. **Saturation Gate** -- Before a selected request is dispatched, the saturation detector evaluates aggregate pool health:
+   - **Capacity available**: The request proceeds immediately through the normal scheduling pipeline (filters → scorers → picker).
+   - **Pool saturated**: The dispatch cycle halts. This preserves strict priority ordering -- a lower-priority request is never dispatched while a higher-priority request is waiting, even if the lower-priority request arrived first.
+
+5. **Late Binding** -- Rather than routing requests prematurely to suboptimal backends, flow control delays the scheduling decision (endpoint selection) until the moment of dispatch. This means the endpoint is chosen using the freshest possible state, improving prefix cache hit rates and reducing tail latency.
+
+#### Saturation Detectors
+
+The saturation detector is the gatekeeper that determines when the pool has capacity to accept new requests. Two detector plugins are available:
+
+**`utilization-detector`** (default) -- Monitors KV-cache utilization and model server queue depth across endpoints:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `queueDepthThreshold` | `5` | Maximum allowed pending queue size on model servers. For maximum throughput, use a small non-zero value (a fraction of the max batch size). For maximum fairness, set to `1` to force centralized EPP queuing. |
+| `kvCacheUtilThreshold` | `0.8` | Maximum KV-cache memory utilization (0.0--1.0) before the pool is considered saturated. |
+
+The pool is considered saturated when *all* endpoints exceed *either* threshold.
+
+**`concurrency-detector`** -- Monitors total in-flight request concurrency across the pool:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `maxConcurrency` | -- | Maximum concurrent requests across the pool. Recommended: set to 110% of the model server's active batch capacity (e.g., batch size of 100 → `maxConcurrency: 110`). |
+
+#### Priority and Fairness
+
+Flow control provides two dimensions of traffic management:
+
+**Priority (strict ordering)** -- The flow controller always dispatches all buffered requests from higher-priority queues before servicing any requests from lower-priority queues. This ensures that latency-sensitive interactive traffic is never delayed by batch or background workloads. Negative-priority requests are held (not rejected) during saturation, guaranteeing eventual delivery.
+
+**Fairness (equitable sharing)** -- Within the same priority level, flow control distributes capacity equitably across distinct fairness IDs. This prevents noisy-neighbor problems where a single tenant or workload monopolizes the pool. Fairness enforcement activates only during contention -- when the pool has spare capacity, all requests are dispatched without throttling.
+
+Clients set their flow identity via HTTP headers:
+- `x-gateway-inference-fairness-id`: Identifies the tenant or workload for fair-share scheduling.
+- Priority is assigned via request metadata or gateway-level policy.
+
+#### Global Resource Limits
+
+Flow control supports byte-level admission limits to prevent the request buffer from consuming unbounded memory:
+
+| Parameter | Description |
+|-----------|-------------|
+| `maxBytes` | Overall HTTP payload capacity limit for the buffer. Supports plain integers and Kubernetes Quantity format (e.g., `10Gi`, `512Mi`). |
+| `defaultRequestTTL` | Fallback time-to-live for queued requests if the client does not specify one (default: `30s`). Requests that exceed their TTL are dropped from the buffer. |
+
+Per-priority-band limits can also be configured to prevent lower-priority traffic from consuming the entire buffer:
+
+| Parameter | Description |
+|-----------|-------------|
+| `priority` | Integer identifier for the priority band. |
+| `maxBytes` | HTTP payload limit for this priority band. |
+| `fairnessPolicyRef` | Name of the fairness policy to apply (default: `global-strict-fairness-policy`). |
+| `orderingPolicyRef` | Name of the ordering policy to apply (default: `fcfs-ordering-policy`). |
+
+#### Late Binding and Performance Trade-offs
+
+A key design principle of flow control is **late binding** -- deferring the endpoint selection decision until the moment of dispatch rather than at request arrival. This has measurable performance implications:
+
+- **Improved cache locality**: By the time a request is dispatched, the EPP has the freshest view of prefix cache state across endpoints, increasing cache hit rates.
+- **Reduced tail latency**: Variance in time-to-first-token (TTFT) decreases because requests are not pinned to endpoints that may become overloaded between assignment and execution.
+- **Protected decode performance**: Time-per-output-token (TPOT) is shielded from interference because backends are not overwhelmed with queued requests.
+- **Trade-off**: Mean TTFT may increase slightly because requests spend time in the EPP buffer rather than in a model server queue. In practice, this is offset by the reduction in P99 latency and improved throughput under load.
+
+#### Scale-to-Zero Support
+
+Flow control enables seamless scale-to-zero for GPU deployments:
+
+- **Request queueing during cold start**: When traffic arrives at a deployment with zero replicas, the flow control layer queues requests in the EPP buffer rather than returning 5xx errors.
+- **Late binding dispatch**: The EPP holds queued requests while the autoscaler provisions pods. Once a model server becomes ready and passes health checks, the EPP immediately dispatches buffered requests.
+- **User experience**: Clients see a latency spike corresponding to pod startup time, but do not receive errors during the scaling event.
+
+This works with both HPA (via the `HPAScaleToZero` feature gate with `minReplicas: 0`) and KEDA-based autoscalers.
+
+#### Flow Control Metrics
+
+Flow control exposes the following Prometheus metrics:
+
+| Metric | Type | Description | Key Labels |
+|--------|------|-------------|------------|
+| `inference_extension_flow_control_queue_size` | Gauge | Current count of requests in the flow control buffer. | `fairness_id`, `priority`, `inference_pool` |
+| `inference_extension_flow_control_queue_bytes` | Gauge | Current size in bytes of all buffered requests. | `fairness_id`, `priority`, `inference_pool` |
+| `inference_extension_flow_control_request_queue_duration_seconds` | Distribution | Total time requests spend in the flow control buffer. | `fairness_id`, `priority`, `outcome`, `inference_pool` |
+| `inference_extension_flow_control_request_enqueue_duration_seconds` | Distribution | Time to enqueue a request into the buffer. | `fairness_id`, `priority`, `outcome` |
+| `inference_extension_flow_control_dispatch_cycle_duration_seconds` | Distribution | Time duration of each dispatch evaluation cycle. | -- |
+| `inference_extension_flow_control_pool_saturation` | Gauge | Current saturation level of the pool (0.0 = empty, 1.0 = fully saturated). | `inference_pool` |
+
+The `inference_extension_flow_control_queue_size` metric is particularly important as it serves as the primary signal for HPA-based autoscaling. See the [workload autoscaling guide](../../../guides/workload-autoscaling/README.hpa-igw.md) for integration details.
 
 ### Monitoring
 
