@@ -286,6 +286,21 @@ containers:
         nvidia.com/gpu: "4"
 ```
 
+## EPP Integration
+
+The EPP collects Prometheus metrics from model server pods to make scheduling decisions. Each model server backend exposes these metrics under different Prometheus metric names. The table below shows the metrics the EPP requires and the corresponding metric names for each backend:
+
+| Metric | vLLM | SGLang |
+|--------|------|--------|
+| Total queued requests | `vllm:num_requests_waiting` (default) | `sglang:num_queue_reqs` |
+| KV-cache usage percentage | `vllm:gpu_cache_usage_perc` (default) | `sglang:token_usage` |
+| LoRA info | `vllm:lora_requests_info` (default) | Not supported (disable with `""`) |
+| Cache info | Default | Not supported (disable with `""`) |
+
+When using vLLM, the EPP uses the correct metric names by default. When using SGLang (or Triton), you must override these names in the EPP Helm values -- see [Model Server Compatibility](epp.md#model-server-compatibility) in the EPP docs.
+
+> **Important**: SGLang requires the `--enable-metrics` flag to expose Prometheus metrics. Without it, the EPP cannot collect scheduling signals and will not route effectively.
+
 ## Further Reading
 
 - [vLLM Documentation](https://docs.vllm.ai/)

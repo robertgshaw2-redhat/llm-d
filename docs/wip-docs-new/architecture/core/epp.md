@@ -1,5 +1,3 @@
->> TODO: add something related to different model server types (https://gateway-api-inference-extension.sigs.k8s.io/implementations/model-servers/)
-
 # Endpoint Picker (EPP)
 
 The Endpoint Picker (EPP) is the core scheduling component of llm-d that makes LLM-aware routing decisions for inference requests.
@@ -188,6 +186,119 @@ The EPP is deployed alongside the InferencePool via the upstream Helm chart. Key
 | `inferenceExtension.tracing.otelExporterEndpoint` | OpenTelemetry collector endpoint | `"http://otel-collector:4317"` |
 | `inferenceExtension.monitoring.prometheus.enabled` | Enable Prometheus metrics scraping | `true` |
 | `inferenceExtension.monitoring.interval` | Prometheus scrape interval | `"10s"` |
+
+### Model Server Compatibility
+
+The EPP scrapes Prometheus metrics from model server pods to drive its scheduling decisions (KV-cache utilization, queue depth, active requests, LoRA adapter info). Different model server backends expose these metrics under different Prometheus metric names, so the EPP must be configured to match the model server in use.
+
+For the full list of metrics per backend, see [EPP Integration](model-servers.md#epp-integration) in the Model Servers docs.
+
+#### vLLM (Default)
+
+vLLM is the default model server -- no additional EPP metric configuration is needed. The EPP's built-in metric names match vLLM's Prometheus exposition format out of the box.
+
+**Compatible versions:** vLLM V0 v0.6.4+, V1 v0.8.0+
+
+**Minimal Helm values:**
+
+```yaml
+inferencePool:
+  modelServerType: vllm          # default, can be omitted
+  targetPorts:
+    - number: 8000
+  modelServers:
+    matchLabels:
+      llm-d.ai/inference-serving: "true"
+```
+
+#### SGLang
+
+SGLang uses different Prometheus metric names and does not yet support LoRA or cache-info metrics. Three things must change compared to a vLLM deployment:
+
+1. **Model server**: Start SGLang with `--enable-metrics` so it exposes a Prometheus endpoint.
+2. **InferencePool**: Set `modelServerType: sglang`.
+3. **EPP flags**: Override the metric names and disable unsupported metrics.
+
+**Helm values:**
+
+```yaml
+inferenceExtension:
+  flags:
+    total-queued-requests-metric: "sglang:num_queue_reqs"
+    kv-cache-usage-percentage-metric: "sglang:token_usage"
+    lora-info-metric: ""          # LoRA not supported by SGLang yet
+    cache-info-metric: ""         # cache-info not supported by SGLang yet
+
+inferencePool:
+  modelServerType: sglang
+  targetPorts:
+    - number: 8000
+  modelServers:
+    matchLabels:
+      llm-d.ai/inference-serving: "true"
+```
+
+Setting a flag to `""` (empty string) disables scraping for that metric. This prevents the EPP from logging errors about missing metrics.
+
+**Compatible versions:** SGLang v0.4.0+
+
+> **Note**: The `pluginsCustomConfig` (the `EndpointPickerConfig` pipeline) does not change between vLLM and SGLang. The same scorers, filters, and pickers work with both backends -- only the metric names differ.
+
+#### Triton (TensorRT-LLM)
+
+Triton with TensorRT-LLM is also supported upstream. Like SGLang, it requires metric name overrides and does not support LoRA metrics.
+
+**Helm values:**
+
+```yaml
+inferenceExtension:
+  flags:
+    total-queued-requests-metric: 'nv_trt_llm_request_metrics{request_type=waiting}'
+    kv-cache-usage-percentage-metric: 'nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=fraction}'
+    lora-info-metric: ""
+
+inferencePool:
+  modelServerType: triton-tensorrt-llm
+  targetPorts:
+    - number: 8000
+  modelServers:
+    matchLabels:
+      llm-d.ai/inference-serving: "true"
+```
+
+**Compatible versions:** Triton v25.03+
+
+#### Multi-Engine Deployments
+
+In advanced scenarios you may run multiple model server backends (e.g., vLLM and SGLang) within the same InferencePool. To enable this:
+
+1. **Label each pod** with its engine type:
+
+   ```yaml
+   labels:
+     inference.networking.k8s.io/engine-type: "vllm"   # or "sglang"
+   ```
+
+2. **Set the default engine** in the `EndpointPickerConfig` if the majority of pods are not vLLM:
+
+   ```yaml
+   apiVersion: inference.networking.x-k8s.io/v1alpha1
+   kind: EndpointPickerConfig
+   defaultEngine: "sglang"
+   ```
+
+   The default engine is `vllm`. Pods without the `engine-type` label are assumed to be running the default engine.
+
+#### Active Ports
+
+Model server pods can declare which ports should receive routed traffic using an annotation:
+
+```yaml
+annotations:
+  inference.networking.k8s.io/active-ports: "8000,8002"
+```
+
+Declared ports must fall within the InferencePool's `targetPorts` range. This is useful for Data Parallelism (DP) deployments where a single pod exposes multiple inference server instances on different ports.
 
 ### Enabling Flow Control
 
