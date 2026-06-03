@@ -4,10 +4,6 @@ router:
       port: 80
       protocol: TCP
       targetPort: 8081
-    - name: metrics
-      port: 9090
-      protocol: TCP
-      targetPort: 9090
   epp:
     pluginsConfigFile: "custom-plugins.yaml"
     pluginsCustomConfig:
@@ -24,7 +20,7 @@ router:
         - type: fcfs-ordering-policy
         - type: concurrency-detector
           parameters:
-            maxConcurrency: 132
+            maxConcurrency: 16
             concurrencyMode: requests
             headroom: 0.0
 
