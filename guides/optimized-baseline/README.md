@@ -80,6 +80,7 @@ This deploys the llm-d Router in [Standalone Mode](placeholder-link):
 # Assuming base-directory is the root of the llm-d repo
 helm install ${GUIDE_NAME} \
     oci://registry.k8s.io/gateway-api-inference-extension/charts/standalone \
+    -f guides/recipes/router/features/monitoring.values.yaml \
     -f guides/recipes/router/base.values.yaml \
     -f guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml \
     -n ${NAMESPACE} --version ${GAIE_VERSION}

@@ -4,10 +4,6 @@ inferenceExtension:
       port: 80
       protocol: TCP
       targetPort: 8081
-    - name: metrics
-      port: 9090
-      protocol: TCP
-      targetPort: 9090
   pluginsConfigFile: "custom-plugins.yaml"
   pluginsCustomConfig:
     custom-plugins.yaml: |
@@ -23,7 +19,7 @@ inferenceExtension:
       - type: fcfs-ordering-policy
       - type: concurrency-detector
         parameters:
-          maxConcurrency: 132
+          maxConcurrency: 16
           concurrencyMode: requests
           headroom: 0.0
 
@@ -37,24 +33,23 @@ inferenceExtension:
         - pluginRef: prefix-cache-scorer
           weight: 3
 
-      saturationDetector:
-        pluginRef: concurrency-detector
-
       flowControl:
         maxBytes: "10Gi"
-        maxRequests: "1k"
+        maxRequests: "2k"
         defaultRequestTTL: "60s"
+        saturationDetector:
+          pluginRef: concurrency-detector
         priorityBands:
         - priority: 100
           maxRequests: "500"
           fairnessPolicyRef: round-robin-fairness-policy
           orderingPolicyRef: fcfs-ordering-policy
         - priority: 0
-          maxRequests: "200"
+          maxRequests: "500"
           fairnessPolicyRef: round-robin-fairness-policy
           orderingPolicyRef: fcfs-ordering-policy
         - priority: -10
-          maxRequests: "50"
+          maxRequests: "500"
           fairnessPolicyRef: round-robin-fairness-policy
           orderingPolicyRef: fcfs-ordering-policy
 

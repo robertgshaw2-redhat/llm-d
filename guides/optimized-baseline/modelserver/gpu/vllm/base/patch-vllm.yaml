@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: decode
 spec:
-  replicas: 8
+  replicas: 4
   template:
     spec:
       containers:
@@ -11,10 +11,8 @@ spec:
           command: ["vllm", "serve"]
           # Include all args in overlay patch for consistency
           args:
-            - "Qwen/Qwen3-32B"
+            - "google/gemma-4-31B-it"
             - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
-            - "--tensor-parallel-size=2"
-            - "--gpu-memory-utilization=0.95"
             # Uncomment for distributed tracing
             # - "--otlp-traces-endpoint=http://otel-collector:4317"
             # - "--collect-detailed-traces=all"
@@ -33,12 +31,12 @@ spec:
           resources:
             limits:
               cpu: '16'
-              memory: 128Gi
-              nvidia.com/gpu: 2
+              memory: 16Gi
+              nvidia.com/gpu: 1
             requests:
               cpu: '8'
-              memory: 96Gi
-              nvidia.com/gpu: 2
+              memory: 16Gi
+              nvidia.com/gpu: 1
           volumeMounts:
             - mountPath: /dev/shm
               name: shm
@@ -65,7 +63,7 @@ spec:
         - name: shm
           emptyDir:
             medium: Memory
-            sizeLimit: 20Gi
+            sizeLimit: 2Gi
         - name: torch-compile-cache
           emptyDir: {}
         - name: triton-cache
