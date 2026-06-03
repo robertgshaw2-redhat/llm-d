@@ -24,8 +24,9 @@ We currently offer the following:
 
 ### Operational Excellence
 
-* [Flow Control](./flow-control.md): Intelligent request queuing for multi-tenant deployments and managing traffic spikes.
+* [Flow Control](./flow-control/README.md) - Intelligent request queuing for multi-tenant deployments and managing traffic spikes.
 * [Workload Autoscaling](./workload-autoscaling/README.md) - autoscale the LLM service via proactive, SLO-aware signals that reflect the true state of the inference system — queue depth, in-flight request counts, and KV cache pressure — so that capacity can be added before end-user latency is impacted.
+* [Rollouts](./rollouts/README.md) - perform incremental rollout operations for LoRA adapters, base models, and model server versions with minimal service disruption using traffic splitting and gradual deployment strategies.
 
 ## Experimental Guides
 
@@ -37,4 +38,3 @@ We currently offer the following:
 Our supporting guides address common operational challenges with model serving at scale:
 
 * [Benchmark](../helpers/benchmark.md) demonstrates how to use automation for running benchmarks against the llm-d stack.
-

@@ -57,15 +57,16 @@ By composing these layers, llm-d allows an inference pool to scale its effective
 
 ### Prefill/Decode Disaggregation
 
-Split inference into dedicated **prefill workers** (prompt processing) and **decode workers** (token generation) to reduce time-to-first-token (TTFT) and achieve more predictable time-per-output-token (TPOT). KV-cache is transferred between phases via [NIXL](https://github.com/ai-dynamo/nixl) over high-speed interconnects (InfiniBand, RoCE RDMA).
+Split inference into dedicated **prefill workers** (prompt processing) and **decode workers** (token generation) to reduce time-to-first-token (TTFT) and achieve more predictable time-per-output-token (TPOT). KV-cache is transferred between phases via [NIXL](https://github.com/ai-dynamo/nixl) over high-speed interconnects (InfiniBand, RoCE).
 
 ### Predicted Latency-Based Routing
 
-An **llm-d Router** capability implemented primarily as an EPP plugin that routes each request to the replica predicted to serve it fastest, using an XGBoost model trained online on live traffic to predict ITL and TTFT. Optionally enforce per-request SLOs via `x-slo-ttft-ms` / `x-slo-tpot-ms` headers — requests that no replica can meet within budget are shed at admission rather than routed to a guaranteed miss. Useful when workload variance makes queue-depth a poor proxy for true load, or when clients need to express interactive vs. batch latency budgets.
+An **llm-d Router** capability implemented primarily as an EPP plugin that routes each request to the replica predicted to serve it fastest, using an XGBoost model trained online on live traffic to predict ITL and TTFT. Optionally enforce per-request SLOs via `x-llm-d-slo-ttft-ms` / `x-llm-d-slo-tpot-ms` headers — requests that no replica can meet within budget are shed at admission rather than routed to a guaranteed miss. Useful when workload variance makes queue-depth a poor proxy for true load, or when clients need to express interactive vs. batch latency budgets.
 
 ### Batch Inference
 
 Manage high-volume offline inference workloads through OpenAI-compatible Batch APIs. llm-d provides two primary components for batch processing:
+
 - **llm-d Batch Gateway** — Provides `/v1/batches` and `/v1/files` endpoints for job submission and tracking.
 - **llm-d Async Processor** — A dispatch agent that pulls requests from message queues (such as Redis and Google Pub/Sub) and feeds them to the llm-d Router with system-aware flow control to prevent impacting interactive traffic.
 
@@ -103,6 +104,7 @@ Two complementary autoscaling patterns:
 In addition to the software components, llm-d provides **Well-Lit Paths** — tested, benchmarked deployment recipes for common production patterns. These paths are starting points designed to be adapted for your models, hardware, and traffic patterns.
 
 Each path includes:
+
 - Deployable Helm charts and Kustomize manifests
 - Key configuration knobs for performance tuning
 - Sample workloads and benchmarks against baseline setups

@@ -1,7 +1,7 @@
 # Autoscaling Workloads with HPA and EPP Metrics
 
 This guide explains how to configure autoscaling for LLM workloads by integrating the
-Kubernetes Horizontal Pod Autoscaler (HPA) with metrics emitted by the Endpoint Picker (EPP). 
+Kubernetes Horizontal Pod Autoscaler (HPA) with metrics emitted by the Endpoint Picker (EPP).
 By using gateway-level signals like queue size and active request counts,
 you can achieve more responsive and model-aware scaling than with traditional
 CPU/Memory metrics.
@@ -18,7 +18,7 @@ The llm-d architecture solves this by using the Endpoint Picker (EPP) [flow cont
 
 Follow the [optimized-baseline](../optimized-baseline/README.md) well-lit path to set up an LLM deployment. By default, llm-d deployments include the necessary ServiceMonitors to scrape EPP metrics.
 
-- **Metric Collection:** For details on how to ensure scraping is active, see the [llm-d Monitoring Guide](../../docs/monitoring/README.md#epp-endpoint-picker-metrics).
+- **Metric Collection:** For details on how to ensure scraping is active, see the [EPP Metrics guide](../../docs/resources/observability/metrics.md#step-3-enable-epp-metrics).
 - **Metric Definitions:** For a list of metrics emitted by EPP refer [here](https://gateway-api-inference-extension.sigs.k8s.io/guides/metrics-and-observability/#exposed-metrics).
 
 ### Recommended Metrics for Scaling
@@ -50,6 +50,7 @@ The Prometheus Adapter bridges Prometheus metrics to the Kubernetes External Met
 which the HPA uses to read EPP signals.
 
 Add the Helm repository and install the adapter into your `monitoring` namespace:
+
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
@@ -61,6 +62,7 @@ helm install prometheus-adapter prometheus-community/prometheus-adapter \
 > **Note:** You must set `prometheus.url` to point to your Prometheus instance. If you are
 using `kube-prometheus-stack`, the default service is `http://prometheus-operated.monitoring.svc:9090`.
 Pass it at install time or in a values file:
+
 ```bash
 helm install prometheus-adapter prometheus-community/prometheus-adapter \
   --namespace monitoring \
@@ -72,6 +74,7 @@ helm install prometheus-adapter prometheus-community/prometheus-adapter \
 ### 3. Configure Prometheus Adapter Rules
 
 Create a values file `epp-adapter-values.yaml` with the following rules:
+
 ```yaml
 rules:
   external:
@@ -99,6 +102,7 @@ rules:
 own deployment names.
 
 Apply the rules by upgrading the adapter:
+
 ```bash
 helm upgrade prometheus-adapter prometheus-community/prometheus-adapter \
   --namespace monitoring \
@@ -107,6 +111,7 @@ helm upgrade prometheus-adapter prometheus-community/prometheus-adapter \
 ```
 
 Verify the metrics are visible to the Kubernetes API:
+
 ```bash
 kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/default/epp_queue_size"
 kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/default/epp_running_requests"
@@ -170,12 +175,14 @@ spec:
 ### 5. Verify the HPA
 
 Apply the manifest and confirm the HPA is reading metrics:
+
 ```bash
 kubectl apply -f hpa.yaml
 kubectl get hpa vllm-llama3-8b-instruct-hpa -n default
 ```
 
 A successful deployment would look like this:
+
 ```
 NAME                          REFERENCE                            TARGETS              MINPODS   MAXPODS   REPLICAS   AGE
 vllm-llama3-8b-instruct-hpa   Deployment/vllm-llama3-8b-instruct   0/250, 0/250 (avg)   1         3         1          5m

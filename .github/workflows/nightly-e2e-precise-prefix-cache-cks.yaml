@@ -1,9 +1,9 @@
 name: Nightly - Precise Prefix Cache E2E (CKS)
 
 # Nightly regression test for the precise-prefix-cache-routing guide on
-# CoreWeave (CKS). Deploys via kustomize + the standalone chart with the UDS
-# tokenizer post-renderer; validates with e2e-validate.sh against the
-# scheduler EPP service (gateway_host).
+# CoreWeave (CKS). Deploys via kustomize + the standalone chart with the
+# vllm-render tokenizer sidecar; validates with e2e-validate.sh against the
+# router EPP service (gateway_host).
 
 on:
   schedule:
@@ -40,15 +40,15 @@ jobs:
       gateway_host: 'precise-prefix-cache-routing-epp'
       custom_deploy_script: |
         export GAIE_VERSION=v1.5.0
+        export ROUTER_CHART_VERSION=v0
         export GUIDE_NAME="precise-prefix-cache-routing"
         export INFRA_PROVIDER="base"
         kubectl apply -n ${NAMESPACE} -k guides/${GUIDE_NAME}/modelserver/gpu/vllm/${INFRA_PROVIDER}
         helm install ${GUIDE_NAME} \
-          oci://registry.k8s.io/gateway-api-inference-extension/charts/standalone \
+          oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev \
           -f guides/recipes/router/base.values.yaml \
           -f guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml \
-          --post-renderer ./guides/${GUIDE_NAME}/router/patches/uds-tokenizer/post-renderer.sh \
-          -n ${NAMESPACE} --version ${GAIE_VERSION}
+          -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
       accelerator_type: H100
       required_gpus: 2
       recommended_gpus: 4

@@ -1,9 +1,6 @@
 # Wide Expert Parallelism
 
-<!--
-[![Nightly - Wide EP LWS E2E (OpenShift)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-ocp.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-ocp.yaml)
--->
-[![Nightly - Wide EP LWS E2E (CKS)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-cks.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-cks.yaml) [![Nightly - Wide EP LWS E2E (GKE)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-gke.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-gke.yaml)
+[![Nightly - Wide EP LWS E2E (OpenShift)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-ocp.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-ocp.yaml) [![Nightly - Wide EP LWS E2E (CKS)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-cks.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-cks.yaml) [![Nightly - Wide EP LWS E2E (GKE GPU)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-gke.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-wide-ep-lws-gke.yaml)
 
 ## Overview
 
@@ -41,31 +38,34 @@ This guide includes configurations for the following accelerators:
 
 ## Prerequisites
 
-- Have the [proper client tools installed on your local system](../../helpers/client-setup/README.md) to use this guide.
-- Checkout llm-d repo:
+* Have the [proper client tools installed on your local system](../../helpers/client-setup/README.md) to use this guide.
+* Checkout llm-d repo:
 
   ```bash
   export branch="main" # branch, tag, or commit hash
   git clone https://github.com/llm-d/llm-d.git && cd llm-d && git checkout ${branch}
   ```
-- Set the following environment variables:
+* Set the following environment variables:
+
   ```bash
   export GAIE_VERSION=v1.5.0
+  export ROUTER_CHART_VERSION=v0
   export GUIDE_NAME="wide-ep-lws"
   export NAMESPACE=llm-d-wide-ep
   export MODEL=deepseek-ai/DeepSeek-R1-0528
   ```
-- Install the Gateway API Inference Extension CRDs:
+* Install the Gateway API Inference Extension CRDs:
 
   ```bash
   kubectl apply -k "https://github.com/kubernetes-sigs/gateway-api-inference-extension/config/crd?ref=${GAIE_VERSION}"
   ```
-- You have deployed the [LeaderWorkerSet controller](https://lws.sigs.k8s.io/docs/installation/)
-- Create a target namespace for the installation:
+* You have deployed the [LeaderWorkerSet controller](https://lws.sigs.k8s.io/docs/installation/)
+* Create a target namespace for the installation:
+
   ```bash
   kubectl create namespace ${NAMESPACE}
   ```
-- [Create the `llm-d-hf-token` secret in your target namespace with the key `HF_TOKEN` matching a valid HuggingFace token](../../helpers/hf-token.md) to pull models.
+* [Create the `llm-d-hf-token` secret in your target namespace with the key `HF_TOKEN` matching a valid HuggingFace token](../../helpers/hf-token.md) to pull models.
 
 ## Installation Instructions
 
@@ -78,10 +78,10 @@ This deploys the llm-d Router with an Envoy sidecar, it doesn't set up a Kuberne
 ```bash
 export REPO_ROOT=$(realpath $(git rev-parse --show-toplevel))
 helm install ${GUIDE_NAME} \
-    oci://registry.k8s.io/gateway-api-inference-extension/charts/standalone \
+    oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev \
     -f ${REPO_ROOT}/guides/recipes/router/base.values.yaml \
     -f ${REPO_ROOT}/guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml \
-    -n ${NAMESPACE} --version ${GAIE_VERSION}
+    -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
 ```
 
 <details>
@@ -97,16 +97,15 @@ export REPO_ROOT=$(realpath $(git rev-parse --show-toplevel))
 
 export PROVIDER_NAME=gke # options: none, gke, agentgateway, istio
 helm install ${GUIDE_NAME} \
-    oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool  \
+    oci://ghcr.io/llm-d/charts/llm-d-router-gateway-dev  \
     -f ${REPO_ROOT}/guides/recipes/router/base.values.yaml \
     -f ${REPO_ROOT}/guides/recipes/router/features/httproute-flags.yaml \
     -f ${REPO_ROOT}/guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml \
     --set provider.name=${PROVIDER_NAME} \
-    -n ${NAMESPACE} --version ${GAIE_VERSION}
+    -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
 ```
 
 </details>
-
 
 ### 2. Deploy the Model Server
 
@@ -117,14 +116,13 @@ export INFRA_PROVIDER=gke # options: gke, coreweave, dgx-cloud-gb200
 kubectl apply -n ${NAMESPACE} -k guides/${GUIDE_NAME}/modelserver/gpu/vllm/${INFRA_PROVIDER}
 ```
 
-
 ### 3. (Optional) Enable monitoring
 
 > [!NOTE]
-> GKE provides [automatic application monitoring](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-automatic-application-monitoring) out of the box. The llm-d [Monitoring stack](../../docs/monitoring/README.md) is not required for GKE, but it is available if you prefer to use it.
+> GKE provides [automatic application monitoring](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-automatic-application-monitoring) out of the box. The llm-d [Monitoring stack](../../docs/resources/observability/setup.md) is not required for GKE, but it is available if you prefer to use it.
 
-- Install the [Monitoring stack](../../docs/monitoring/README.md).
-- Deploy the monitoring resources for this guide.
+* Install the [Monitoring stack](../../docs/resources/observability/setup.md).
+* Deploy the monitoring resources for this guide.
 
 ```bash
 kubectl apply -n ${NAMESPACE} -k guides/recipes/modelserver/components/monitoring-pd
@@ -157,6 +155,7 @@ export IP=$(kubectl get service ${GUIDE_NAME}-epp -n ${NAMESPACE} -o jsonpath='{
 ```bash
 export IP=$(kubectl get gateway llm-d-inference-gateway -n ${NAMESPACE} -o jsonpath='{.status.addresses[0].value}')
 ```
+
 </details>
 
 ### 2. Send Test Requests
@@ -188,7 +187,7 @@ The benchmark launches a pod (`llmdbench-harness-launcher`) that, in this case, 
 
 ### 1. Prepare the Benchmarking Suite
 
-- Download the benchmark script:
+* Download the benchmark script:
 
 ```bash
 curl -L -O https://raw.githubusercontent.com/llm-d/llm-d-benchmark/main/existing_stack/run_only.sh
@@ -222,11 +221,11 @@ kubectl delete -n ${NAMESPACE} -k guides/${GUIDE_NAME}/modelserver/<gke|coreweav
 ## Benchmarking Report
 
 The benchmark is running on:
+
 * Provider: CKS
 * Prefill: 1 instance with EP=16
 * Decode: 1 instance with EP=16
 * 4 H200 VMs, 32 GPUs, Infiniband
-
 
 <details>
 <summary><b><i>Click</i></b> here to view the report from the above example</summary>

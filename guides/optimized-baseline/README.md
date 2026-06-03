@@ -1,6 +1,6 @@
 # Optimized Baseline
 
-[![Nightly - optimized baseline E2E (OpenShift)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-ocp.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-ocp.yaml) [![Nightly - optimized baseline E2E (CKS)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-cks.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-cks.yaml) [![Nightly - optimized baseline E2E (GKE)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-gke.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-gke.yaml)
+[![Nightly - optimized baseline E2E (OpenShift)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-ocp.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-ocp.yaml) [![Nightly - optimized baseline E2E (CKS)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-cks.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-cks.yaml) [![Nightly - optimized baseline E2E (GKE GPU)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-gke.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-gke.yaml) [![Nightly - optimized baseline E2E (GKE TPU)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-gke-tpu.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-gke-tpu.yaml) [![Nightly - optimized baseline E2E (XPU)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-xpu.yaml/badge.svg)](https://github.com/llm-d/llm-d/actions/workflows/nightly-e2e-optimized-baseline-xpu.yaml)
 
 ## Overview
 
@@ -52,11 +52,14 @@ This guide includes configurations for the following accelerators:
   ```
 
 - Set the following environment variables:
+
   ```bash
     export GAIE_VERSION=v1.5.0
+    export ROUTER_CHART_VERSION=v0
     export GUIDE_NAME="optimized-baseline"
     export NAMESPACE=llm-d-optimized-baseline
   ```
+
 - Install the Gateway API Inference Extension CRDs:
 
   ```bash
@@ -64,6 +67,7 @@ This guide includes configurations for the following accelerators:
   ```
 
 - Create a target namespace for the installation
+
   ```bash
       kubectl create namespace ${NAMESPACE}
   ```
@@ -79,11 +83,11 @@ This deploys the llm-d Router in [Standalone Mode](placeholder-link):
 ```bash
 # Assuming base-directory is the root of the llm-d repo
 helm install ${GUIDE_NAME} \
-    oci://registry.k8s.io/gateway-api-inference-extension/charts/standalone \
+    oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev \
     -f guides/recipes/router/features/monitoring.values.yaml \
     -f guides/recipes/router/base.values.yaml \
     -f guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml \
-    -n ${NAMESPACE} --version ${GAIE_VERSION}
+    -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
 ```
 
 <details>
@@ -97,13 +101,13 @@ To use a Kubernetes Gateway managed proxy rather than the standalone version, fo
 ```bash
 export PROVIDER_NAME=gke # options: none, gke, agentgateway, istio
 helm install ${GUIDE_NAME} \
-    oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool  \
+    oci://ghcr.io/llm-d/charts/llm-d-router-gateway-dev  \
     -f guides/recipes/router/base.values.yaml \
     -f guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml \
     --set provider.name=${PROVIDER_NAME} \
-    --set experimentalHttpRoute.enabled=true \
-    --set experimentalHttpRoute.inferenceGatewayName=llm-d-inference-gateway \
-    -n ${NAMESPACE} --version ${GAIE_VERSION}
+    --set httpRoute.create=true \
+    --set httpRoute.inferenceGatewayName=llm-d-inference-gateway \
+    -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
 ```
 
 </details>
@@ -145,9 +149,9 @@ kubectl apply -n ${NAMESPACE} -k guides/${GUIDE_NAME}/modelserver/cpu/vllm/
 ### 3. (Optional) Enable monitoring
 
 > [!NOTE]
-> GKE provides [automatic application monitoring](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-automatic-application-monitoring) out of the box. The llm-d [Monitoring stack](../../docs/monitoring/README.md) is not required for GKE, but it is available if you prefer to use it.
+> GKE provides [automatic application monitoring](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/configure-automatic-application-monitoring) out of the box. The llm-d [Monitoring stack](../../docs/resources/observability/setup.md) is not required for GKE, but it is available if you prefer to use it.
 
-- Install the [Monitoring stack](../../docs/monitoring/README.md).
+- Install the [Monitoring stack](../../docs/resources/observability/setup.md).
 - Deploy the monitoring resources for this guide.
 
 ```bash

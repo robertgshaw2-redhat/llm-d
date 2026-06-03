@@ -1,4 +1,4 @@
-name: Nightly - Tiered Prefix Cache CPU Offloading LMCache E2E (GKE)
+name: Nightly - Tiered Prefix Cache CPU Offloading LMCache E2E (GKE GPU)
 
 # Nightly regression test for the tiered-prefix-cache/cpu guide with LMCache connector on GKE.
 # Deploys the LMCache connector and validates with e2e-validate.sh.
@@ -38,16 +38,17 @@ jobs:
       gateway_host: 'tiered-prefix-cache-cpu-epp'
       custom_deploy_script: |
         export GAIE_VERSION=v1.5.0
+        export ROUTER_CHART_VERSION=v0
         export GUIDE_NAME="tiered-prefix-cache-cpu"
         export ACCELERATOR="gpu"
         export CONNECTOR="lmcache-connector"
         export INFRA_PROVIDER="gke"
         kubectl apply -n ${NAMESPACE} -k guides/tiered-prefix-cache/cpu/modelserver/${ACCELERATOR}/vllm/${CONNECTOR}/${INFRA_PROVIDER}
         helm install ${GUIDE_NAME} \
-          oci://registry.k8s.io/gateway-api-inference-extension/charts/standalone \
+          oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev \
           -f guides/recipes/router/base.values.yaml \
           -f guides/tiered-prefix-cache/cpu/router/${GUIDE_NAME}.values.yaml \
-          -n ${NAMESPACE} --version ${GAIE_VERSION}
+          -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
       gke_cluster_name: llm-d-e2e-us-east5
       gke_cluster_zone: us-east5
       required_gpus: 8

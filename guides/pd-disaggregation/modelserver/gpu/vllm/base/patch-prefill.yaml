@@ -42,6 +42,10 @@ spec:
               name: shm
             - mountPath: /.cache
               name: torch-compile-cache
+            - mountPath: /.config
+              name: vllm-config
+            - mountPath: /.triton
+              name: triton-cache
           startupProbe:
             initialDelaySeconds: 15
             periodSeconds: 30
@@ -61,4 +65,8 @@ spec:
             medium: Memory
             sizeLimit: 20Gi
         - name: torch-compile-cache
+          emptyDir: {}
+        - name: vllm-config
+          emptyDir: {}
+        - name: triton-cache
           emptyDir: {}
