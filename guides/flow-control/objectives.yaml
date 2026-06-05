@@ -5,11 +5,11 @@ metadata:
   labels:
     llm-d.ai/guide: "flow-control"
     llm-d.ai/inference-serving: "true"
-    llm-d.ai/model: "Qwen3-32B"
+    llm-d.ai/model: "gemma-4-31B-it"
 spec:
   priority: 100
   poolRef:
-    name: default-pool
+    name: flow-control
 ---
 apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
@@ -18,11 +18,11 @@ metadata:
   labels:
     llm-d.ai/guide: "flow-control"
     llm-d.ai/inference-serving: "true"
-    llm-d.ai/model: "Qwen3-32B"
+    llm-d.ai/model: "gemma-4-31B-it"
 spec:
   priority: 0
   poolRef:
-    name: default-pool
+    name: flow-control
 ---
 apiVersion: llm-d.ai/v1alpha2
 kind: InferenceObjective
@@ -31,8 +31,8 @@ metadata:
   labels:
     llm-d.ai/guide: "flow-control"
     llm-d.ai/inference-serving: "true"
-    llm-d.ai/model: "Qwen3-32B"
+    llm-d.ai/model: "gemma-4-31B-it"
 spec:
   priority: -10
   poolRef:
-    name: default-pool
+    name: flow-control

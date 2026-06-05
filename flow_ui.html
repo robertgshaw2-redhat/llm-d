@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flow Control — Live</title>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --panel: #141b27;
+    --panel2: #1b2433;
+    --line: #28344a;
+    --txt: #e6edf6;
+    --muted: #8a99ad;
+    --premium: #36d399;
+    --standard: #fbbd23;
+    --red: #f87272;
+    --accent: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, monospace;
+  }
+  body { padding: 18px 22px 40px; }
+  h1 { font-size: 18px; margin: 0 0 2px; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+  .sub code { color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 340px 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 880px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px;
+  }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 14px; font-weight: 600; }
+
+  /* Saturation banner */
+  .banner {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-radius: 10px; margin-bottom: 16px; font-weight: 600;
+    border: 1px solid var(--line);
+  }
+  .banner.healthy { background: rgba(54,211,153,.12); border-color: rgba(54,211,153,.4); color: var(--premium); }
+  .banner.saturated { background: rgba(248,114,114,.12); border-color: rgba(248,114,114,.45); color: var(--red); }
+  .banner .cap { color: var(--muted); font-weight: 500; font-size: 12px; }
+
+  /* Sliders */
+  .tenant { margin-bottom: 22px; }
+  .tenant:last-child { margin-bottom: 4px; }
+  .tenant .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+  .name { font-weight: 600; }
+  .obj { color: var(--muted); font-size: 11px; }
+  .val { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 18px; }
+  input[type=range] { width: 100%; -webkit-appearance: none; height: 6px; border-radius: 4px; background: var(--panel2); outline: none; }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+    background: currentColor; cursor: pointer; border: 3px solid var(--bg);
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: currentColor; cursor: pointer; border: 3px solid var(--bg); }
+  .ticks { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; margin-top: 3px; }
+  .premium { color: var(--premium); }
+  .standard { color: var(--standard); }
+
+  /* Controls row */
+  .controls { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .controls label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; cursor: help; }
+  .hint { color: var(--muted); font-size: 11px; line-height: 1.5; margin: -4px 0 12px; }
+  .hint b { color: var(--txt); font-weight: 600; }
+  select, button {
+    background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 9px; font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button { border: none; border-radius: 0; border-right: 1px solid var(--line); }
+  .seg button:last-child { border-right: none; }
+  .seg button.active { background: var(--accent); color: #04121f; font-weight: 600; }
+
+  /* Chart */
+  .chart-wrap { position: relative; }
+  canvas { width: 100%; display: block; }
+  .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; }
+  .legend i { width: 18px; height: 3px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+
+  /* Stat cards */
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 18px; }
+  .card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .card .ttl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 8px; display: flex; align-items: center; }
+  .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 12px; }
+  .metrics .m { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+  .metrics .m b { color: var(--muted); font-weight: 500; }
+  .codes { margin-top: 9px; display: flex; gap: 12px; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .codes .ok { color: var(--premium); } .codes .warn { color: var(--standard); } .codes .bad { color: var(--red); }
+  .good { color: var(--premium); } .mid { color: var(--standard); } .hot { color: var(--red); }
+  .disconnected { color: var(--red); }
+</style>
+</head>
+<body>
+  <h1 id="page-title">EPP Flow Control — Live</h1>
+  <div class="sub">Target <code id="target-url">…</code> · model <code id="model-name">…</code>. <span id="sub-hint">Drag the sliders to change how many requests each flow holds in flight, and watch latency move.</span></div>
+
+  <div id="banner" class="banner healthy">
+    <span id="banner-state">HEALTHY</span>
+    <span class="cap" id="banner-cap"></span>
+  </div>
+
+  <div class="grid">
+    <!-- LEFT: controls -->
+    <div class="panel">
+      <div class="seg" id="mode-seg" style="margin-bottom:16px; width:100%;">
+        <button data-mode="concurrency" class="active" style="flex:1" title="Closed loop: hold N requests in flight per flow.">Concurrency</button>
+        <button data-mode="qps" style="flex:1" title="Open loop: issue N requests per second per flow, regardless of how many are already in flight.">Queries / sec</button>
+      </div>
+      <h2 id="control-title">Concurrency</h2>
+      <div id="tenants"></div>
+      <div style="margin-top:18px; display:flex; gap:10px;">
+        <button id="reset-btn" title="Clear latency history & counters">Reset metrics</button>
+        <button id="zero-btn" title="Set both flows to 0">Stop all</button>
+      </div>
+    </div>
+
+    <!-- RIGHT: chart + cards -->
+    <div class="panel">
+      <div class="controls">
+        <div class="seg" id="metric-seg">
+          <button data-metric="p95_ttft" class="active">P95 TTFT</button>
+          <button data-metric="med_ttft">Median TTFT</button>
+          <button data-metric="max_ttft">Max TTFT</button>
+          <button data-metric="p95_total">P95 Total</button>
+          <button data-metric="med_total">Median Total</button>
+          <button data-metric="max_total">Max latency</button>
+        </div>
+        <label title="How much time the chart shows on the x-axis. Purely visual — does not change how points are computed.">Chart span
+          <select id="span-sel">
+            <option value="30">30s</option>
+            <option value="60" selected>60s</option>
+            <option value="120">120s</option>
+            <option value="300">5m</option>
+          </select>
+        </label>
+        <label title="Trailing window each plotted point is computed over. Each point aggregates (e.g. P95/median/max) every request that finished in the preceding N seconds. Smaller = more responsive but noisier; larger = smoother but slower to react.">Avg window
+          <select id="window-sel">
+            <option value="3">3s</option>
+            <option value="5">5s</option>
+            <option value="10" selected>10s</option>
+            <option value="20">20s</option>
+          </select>
+        </label>
+        <span id="conn" style="margin-left:auto; font-size:12px;"></span>
+      </div>
+      <div class="hint">
+        <b>Chart span</b> sets the visible time range on the x-axis.
+        <b>Avg window</b> sets the trailing window each point is averaged over —
+        larger smooths out spikes, smaller reacts faster.
+      </div>
+
+      <div class="chart-wrap">
+        <canvas id="chart" height="340"></canvas>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--premium)"></i>premium-tenant</span>
+        <span><i style="background:var(--standard)"></i>standard-tenant</span>
+        <span id="y-label" style="margin-left:auto;color:var(--muted)"></span>
+      </div>
+
+      <div class="cards" id="cards"></div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+
+const TENANT_COLORS = { "premium-tenant": getCSS("--premium"), "standard-tenant": getCSS("--standard") };
+function getCSS(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+let CONFIG = null;
+let mode = "concurrency";   // "concurrency" | "qps"
+// Dialed-in slider values are kept per mode so toggling preserves both.
+const values = { concurrency: {}, qps: {} };
+let metric = "p95_ttft";
+let chartSpan = 60;      // seconds shown on the chart
+let smoothing = 10;      // backend trailing aggregation window (s)
+
+// Per-mode UI knobs: slider bounds/step and how a value is rendered.
+const MODES = {
+  concurrency: {
+    title: "Concurrency",
+    hint: "Drag the sliders to change how many requests each flow holds in flight, and watch latency move.",
+    max: () => CONFIG.max_concurrency,
+    step: 1,
+    fmt: (v) => String(Math.round(v)),
+  },
+  qps: {
+    title: "Queries / sec",
+    hint: "Drag the sliders to set how many requests per second each flow issues (open loop), and watch latency move.",
+    max: () => CONFIG.max_qps,
+    step: 0.1,
+    fmt: (v) => (+v).toFixed(1) + "/s",
+  },
+};
+// Per-tenant rolling history of { t (ms), value } for the selected metric is
+// kept separately per metric key so switching metrics keeps prior data.
+const history = {};      // fid -> [ {t, p95_ttft, med_ttft, max_ttft, p95_total, med_total, max_total} ]
+let lastOk = 0;
+
+const METRIC_LABELS = {
+  p95_ttft: "P95 time-to-first-token (s)",
+  med_ttft: "Median time-to-first-token (s)",
+  max_ttft: "Max time-to-first-token (s)",
+  p95_total: "P95 total latency (s)",
+  med_total: "Median total latency (s)",
+  max_total: "Max total latency (s)",
+};
+
+// ---------- init ----------
+async function init() {
+  CONFIG = await fetch("/api/config").then(r => r.json());
+  document.getElementById("target-url").textContent = CONFIG.url;
+  document.getElementById("model-name").textContent = CONFIG.model;
+  mode = CONFIG.mode || "concurrency";
+
+  for (const t of CONFIG.tenants) {
+    history[t.fairness_id] = [];
+    values.concurrency[t.fairness_id] = 0;
+    values.qps[t.fairness_id] = 0;
+  }
+  applyMode();   // sets control title/hint + builds the sliders for `mode`
+
+  // mode toggle (Concurrency <-> QPS)
+  document.querySelectorAll("#mode-seg button").forEach(b => {
+    b.addEventListener("click", () => setMode(b.dataset.mode));
+  });
+
+  // metric selector
+  document.querySelectorAll("#metric-seg button").forEach(b => {
+    b.addEventListener("click", () => {
+      metric = b.dataset.metric;
+      document.querySelectorAll("#metric-seg button").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      draw();
+    });
+  });
+  document.getElementById("span-sel").addEventListener("change", e => { chartSpan = +e.target.value; draw(); });
+  document.getElementById("window-sel").addEventListener("change", e => { smoothing = +e.target.value; });
+  document.getElementById("reset-btn").addEventListener("click", async () => {
+    await fetch("/api/reset", { method: "POST" });
+    for (const k in history) history[k] = [];
+    draw();
+  });
+  document.getElementById("zero-btn").addEventListener("click", () => {
+    for (const t of CONFIG.tenants) setTarget(t.fairness_id, 0, true);
+  });
+
+  window.addEventListener("resize", draw);
+  draw();
+  poll();
+}
+
+// Re-skin the whole control panel for the current `mode`: title, hint, and the
+// per-tenant sliders (bounds/step/value all differ between modes).
+function applyMode() {
+  const m = MODES[mode];
+  document.getElementById("control-title").textContent = m.title;
+  document.getElementById("sub-hint").textContent = m.hint;
+  document.querySelectorAll("#mode-seg button").forEach(b => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+  });
+  buildTenantControls();
+}
+
+function setMode(next) {
+  if (next === mode || !MODES[next]) return;
+  mode = next;
+  applyMode();
+  fetch("/api/mode", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  }).catch(() => {});
+}
+
+function buildTenantControls() {
+  const m = MODES[mode];
+  const max = m.max();
+  const root = document.getElementById("tenants");
+  root.innerHTML = "";
+  // premium first (higher priority on top, like the CLI dashboard)
+  const tenants = [...CONFIG.tenants].sort((a, b) => b.priority - a.priority);
+  for (const t of tenants) {
+    const cls = t.fairness_id === "premium-tenant" ? "premium" : "standard";
+    const cur = values[mode][t.fairness_id] || 0;
+    const el = document.createElement("div");
+    el.className = "tenant " + cls;
+    el.innerHTML = `
+      <div class="row">
+        <div><span class="dot" style="background:${TENANT_COLORS[t.fairness_id]}"></span>
+          <span class="name">${t.fairness_id}</span>
+          <span class="obj">· ${t.objective} · pri ${t.priority}</span>
+        </div>
+        <span class="val" id="val-${t.fairness_id}">${m.fmt(cur)}</span>
+      </div>
+      <input type="range" min="0" max="${max}" step="${m.step}" value="${cur}"
+             id="slider-${t.fairness_id}" />
+      <div class="ticks"><span>0</span><span>${m.fmt(max/2)}</span><span>${m.fmt(max)}</span></div>
+    `;
+    root.appendChild(el);
+    const slider = el.querySelector("input");
+    slider.addEventListener("input", () => {
+      document.getElementById("val-" + t.fairness_id).textContent = m.fmt(+slider.value);
+      setTarget(t.fairness_id, +slider.value, false);
+    });
+  }
+}
+
+// Post the dialed-in value to the endpoint for the current mode, debounced a
+// touch so dragging doesn't flood the server.
+const pending = {};
+function setTarget(fid, target, immediate) {
+  values[mode][fid] = target;
+  if (immediate) {
+    const s = document.getElementById("slider-" + fid);
+    if (s) s.value = target;
+    const v = document.getElementById("val-" + fid);
+    if (v) v.textContent = MODES[mode].fmt(target);
+  }
+  pending[fid] = target;
+  if (setTarget._timer) return;
+  setTarget._timer = setTimeout(flushTargets, 40);
+}
+async function flushTargets() {
+  setTarget._timer = null;
+  const endpoint = mode === "qps" ? "/api/qps" : "/api/concurrency";
+  const updates = { ...pending };
+  for (const k in pending) delete pending[k];
+  for (const fid in updates) {
+    fetch(endpoint, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fairness_id: fid, target: updates[fid] }),
+    }).catch(() => {});
+  }
+}
+
+// ---------- polling ----------
+async function poll() {
+  try {
+    const data = await fetch("/api/stats?window=" + smoothing).then(r => r.json());
+    lastOk = Date.now();
+    onStats(data);
+    setConn(true);
+  } catch (e) {
+    setConn(false);
+  } finally {
+    setTimeout(poll, 500);
+  }
+}
+
+function setConn(ok) {
+  const el = document.getElementById("conn");
+  if (ok) { el.textContent = "● live"; el.style.color = getCSS("--premium"); el.classList.remove("disconnected"); }
+  else { el.textContent = "● disconnected"; el.classList.add("disconnected"); }
+}
+
+function onStats(data) {
+  // banner
+  const banner = document.getElementById("banner");
+  const sat = data.saturated;
+  banner.className = "banner " + (sat ? "saturated" : "healthy");
+  document.getElementById("banner-state").textContent = sat ? "SATURATED" : "HEALTHY";
+  // Render the capacity/throughput summary according to the active driving mode.
+  const cap = document.getElementById("banner-cap");
+  if (data.mode === "qps") {
+    cap.innerHTML = `Target <b>${data.total_target_qps.toFixed(1)}/s</b> · achieved `
+      + `<b>${data.total_qps.toFixed(1)}/s</b> · in-flight <b>${data.total_active}</b> `
+      + `· capacity <b>${data.capacity}</b>`;
+  } else {
+    cap.innerHTML = `Target concurrency <b>${data.total_target}</b> / capacity `
+      + `<b>${data.capacity}</b> · in-flight <b>${data.total_active}</b>`;
+  }
+
+  const now = data.ts_ms;
+  for (const t of data.tenants) {
+    const h = history[t.fairness_id] || (history[t.fairness_id] = []);
+    h.push({
+      t: now,
+      p95_ttft: t.p95_ttft, med_ttft: t.med_ttft, max_ttft: t.max_ttft,
+      p95_total: t.p95_total, med_total: t.med_total, max_total: t.max_total,
+    });
+    // prune to the largest span we might show (5m) plus a little slack
+    const cutoff = now - 320000;
+    while (h.length && h[0].t < cutoff) h.shift();
+  }
+  renderCards(data);
+  draw();
+}
+
+// ---------- stat cards ----------
+function fmt(v, unit) { return (v === null || v === undefined) ? "—" : v.toFixed(2) + (unit || ""); }
+function latClass(v) { if (v === null || v === undefined) return ""; return v < 2 ? "good" : v < 10 ? "mid" : "hot"; }
+
+function renderCards(data) {
+  const root = document.getElementById("cards");
+  const qps = data.mode === "qps";
+  const tenants = [...data.tenants].sort((a, b) => b.priority - a.priority);
+  root.innerHTML = tenants.map(t => `
+    <div class="card">
+      <div class="ttl"><span class="dot" style="background:${TENANT_COLORS[t.fairness_id]}"></span>${t.fairness_id}</div>
+      <div class="metrics">
+        <div class="m"><b>med TTFT</b><span class="${latClass(t.med_ttft)}">${fmt(t.med_ttft,"s")}</span></div>
+        <div class="m"><b>p95 TTFT</b><span class="${latClass(t.p95_ttft)}">${fmt(t.p95_ttft,"s")}</span></div>
+        <div class="m"><b>max TTFT</b><span class="${latClass(t.max_ttft)}">${fmt(t.max_ttft,"s")}</span></div>
+        <div class="m"><b>med total</b><span>${fmt(t.med_total,"s")}</span></div>
+        <div class="m"><b>p95 total</b><span>${fmt(t.p95_total,"s")}</span></div>
+        <div class="m"><b>max total</b><span>${fmt(t.max_total,"s")}</span></div>
+        <div class="m"><b>in-flight</b><span>${qps ? t.active : t.active + " / " + t.target}</span></div>
+        <div class="m"><b>QPS</b><span>${qps ? t.qps.toFixed(1) + " / " + t.target_qps.toFixed(1) : t.qps.toFixed(1)}</span></div>
+      </div>
+      <div class="codes">
+        <span class="ok">200: ${t.s_200}</span>
+        <span class="warn">429: ${t.s_429}</span>
+        <span class="bad">503: ${t.s_503}</span>
+        <span class="bad">err: ${t.s_err}</span>
+      </div>
+    </div>
+  `).join("");
+}
+
+// ---------- canvas chart ----------
+function draw() {
+  const canvas = document.getElementById("chart");
+  if (!CONFIG) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || canvas.parentElement.clientWidth;
+  const cssH = 340;
+  canvas.width = cssW * dpr; canvas.height = cssH * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const padL = 52, padR = 12, padT = 12, padB = 24;
+  const W = cssW - padL - padR, H = cssH - padT - padB;
+  const now = Date.now();
+  const tMin = now - chartSpan * 1000, tMax = now;
+
+  document.getElementById("y-label").textContent = METRIC_LABELS[metric];
+
+  // find y-max across visible data
+  let yMax = 0;
+  for (const fid in history) {
+    for (const p of history[fid]) {
+      if (p.t < tMin) continue;
+      const v = p[metric];
+      if (v !== null && v !== undefined && v > yMax) yMax = v;
+    }
+  }
+  yMax = niceCeil(Math.max(yMax, 0.5));
+
+  // grid + y labels
+  ctx.strokeStyle = getCSS("--line"); ctx.fillStyle = getCSS("--muted");
+  ctx.lineWidth = 1; ctx.font = "11px monospace"; ctx.textBaseline = "middle";
+  const yticks = 5;
+  for (let i = 0; i <= yticks; i++) {
+    const y = padT + H * (i / yticks);
+    const val = yMax * (1 - i / yticks);
+    ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + W, y); ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.textAlign = "right"; ctx.fillText(val.toFixed(val < 10 ? 1 : 0) + "s", padL - 8, y);
+  }
+  // x labels (every ~10s relative)
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  const step = chartSpan <= 60 ? 10 : chartSpan <= 120 ? 20 : 60;
+  for (let s = 0; s <= chartSpan; s += step) {
+    const x = padL + W * (1 - s / chartSpan);
+    ctx.fillText("-" + s + "s", x, padT + H + 6);
+  }
+
+  const xOf = t => padL + W * ((t - tMin) / (tMax - tMin));
+  const yOf = v => padT + H * (1 - v / yMax);
+
+  // capacity context line is not meaningful for latency; skip.
+  for (const fid of Object.keys(history)) {
+    const pts = history[fid].filter(p => p.t >= tMin && p[metric] !== null && p[metric] !== undefined);
+    if (!pts.length) continue;
+    ctx.strokeStyle = TENANT_COLORS[fid]; ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const x = xOf(p.t), y = yOf(Math.min(p[metric], yMax));
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    // latest point marker
+    const last = pts[pts.length - 1];
+    ctx.fillStyle = TENANT_COLORS[fid];
+    ctx.beginPath(); ctx.arc(xOf(last.t), yOf(Math.min(last[metric], yMax)), 3, 0, 7); ctx.fill();
+  }
+
+  if (Object.values(history).every(h => h.filter(p => p.t >= tMin && p[metric] != null).length === 0)) {
+    ctx.fillStyle = getCSS("--muted"); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = "13px monospace";
+    ctx.fillText("Waiting for completed requests… drag a slider up to start traffic.", padL + W / 2, padT + H / 2);
+  }
+}
+
+function niceCeil(v) {
+  if (v <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / mag;
+  const nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+  return nice * mag;
+}
+
+init();
+</script>
+</body>
+</html>

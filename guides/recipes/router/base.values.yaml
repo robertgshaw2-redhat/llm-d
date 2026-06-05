@@ -5,9 +5,9 @@ router:
   epp:
     replicas: 1
     image:
-      registry: ghcr.io/llm-d
-      repository: llm-d-router-endpoint-picker-dev  # TODO: drop -dev for release
-      tag: main  # TODO: pin to a released tag (e.g. v0.9.0)
+      registry: ghcr.io/asharkhan3101
+      repository: llm-d-router  # TODO: drop -dev for release
+      tag: v0.8.1  # TODO: pin to a released tag (e.g. v0.9.0)
       pullPolicy: Always  # TODO : change to IfNotPresent once we release a version
     flags:
       v: 2

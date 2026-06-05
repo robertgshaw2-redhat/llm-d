@@ -3,16 +3,16 @@ kind: Kustomization
 resources:
   - ../../../../../recipes/modelserver/base/single-host/default
 
-namePrefix: optimized-baseline-nvidia-gpu-vllm-
+namePrefix: vllm-gemma-
 
 images:
   - name: REPLACE_MODEL_SERVER_IMAGE
     newName: vllm/vllm-openai
-    newTag: v0.19.1
+    newTag: v0.21.0-x86_64 
 
 labels:
   - pairs:
-      llm-d.ai/model: Qwen3-32B
+      llm-d.ai/model: gemma-4-31B-it
       llm-d.ai/guide: optimized-baseline
       llm-d.ai/accelerator-variant: gpu
       llm-d.ai/accelerator-vendor: nvidia
