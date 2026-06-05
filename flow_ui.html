@@ -96,6 +96,33 @@
   .codes .ok { color: var(--premium); } .codes .warn { color: var(--standard); } .codes .bad { color: var(--red); }
   .good { color: var(--premium); } .mid { color: var(--standard); } .hot { color: var(--red); }
   .disconnected { color: var(--red); }
+
+  /* Schedule editor */
+  .sched-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .sched-toolbar .loopcb { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 5px; cursor: pointer; margin-left: auto; }
+  .sched-progress { font-size: 12px; color: var(--muted); margin: 8px 0 12px; font-variant-numeric: tabular-nums; }
+  .sched-progress b { color: var(--txt); }
+  .sched-progress.running { color: var(--premium); }
+  table.sched-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 10px; }
+  table.sched-table th { color: var(--muted); font-weight: 600; text-align: right; padding: 4px 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+  table.sched-table th:first-child { text-align: left; }
+  table.sched-table td { padding: 3px 6px; text-align: right; }
+  table.sched-table td:first-child { text-align: left; color: var(--muted); font-variant-numeric: tabular-nums; }
+  table.sched-table tr.active td { background: rgba(96,165,250,.12); }
+  table.sched-table input[type=number] {
+    width: 56px; background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 6px; font: inherit; text-align: right;
+  }
+  table.sched-table input[type=number]:focus { border-color: var(--accent); outline: none; }
+  table.sched-table .del { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px 6px; font-size: 14px; }
+  table.sched-table .del:hover { color: var(--red); }
+  .sched-run { display: flex; gap: 10px; margin-top: 12px; }
+  .sched-run button { flex: 1; padding: 8px; font-weight: 600; }
+  .sched-run button.run { background: rgba(54,211,153,.15); border-color: rgba(54,211,153,.45); color: var(--premium); }
+  .sched-run button.run:hover { border-color: var(--premium); }
+  .sched-run button.stop { background: rgba(248,114,114,.12); border-color: rgba(248,114,114,.4); color: var(--red); }
+  .sched-run button.stop:hover:not(:disabled) { border-color: var(--red); }
+  .sched-run button:disabled { opacity: .4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -113,9 +140,28 @@
       <div class="seg" id="mode-seg" style="margin-bottom:16px; width:100%;">
         <button data-mode="concurrency" class="active" style="flex:1" title="Closed loop: hold N requests in flight per flow.">Concurrency</button>
         <button data-mode="qps" style="flex:1" title="Open loop: issue N requests per second per flow, regardless of how many are already in flight.">Queries / sec</button>
+        <button data-mode="schedule" style="flex:1" title="Play back a timed per-tenant QPS scenario (e.g. burstiness) automatically.">Schedule</button>
       </div>
       <h2 id="control-title">Concurrency</h2>
       <div id="tenants"></div>
+
+      <!-- Schedule editor (shown only in Schedule mode) -->
+      <div id="schedule-panel" style="display:none">
+        <div class="sched-toolbar">
+          <select id="preset-sel" title="Pick a starting scenario to load into the editor."></select>
+          <button id="preset-load" title="Replace the current segments with the selected preset.">Load</button>
+          <label class="loopcb" title="Restart the scenario from the top when it finishes."><input type="checkbox" id="sched-loop" /> Loop</label>
+        </div>
+        <div class="chart-wrap"><canvas id="sched-timeline" height="96"></canvas></div>
+        <div id="sched-progress" class="sched-progress">Idle — edit the scenario below, then press Run.</div>
+        <table id="sched-table" class="sched-table"></table>
+        <button id="add-seg" title="Append a new segment to the end of the scenario.">+ Add segment</button>
+        <div class="sched-run">
+          <button id="run-btn" class="run" title="Play the scenario from the top.">▶ Run scenario</button>
+          <button id="stop-btn" class="stop" title="Stop playback and drop all traffic to zero." disabled>■ Stop</button>
+        </div>
+      </div>
+
       <div style="margin-top:18px; display:flex; gap:10px;">
         <button id="reset-btn" title="Clear latency history & counters">Reset metrics</button>
         <button id="zero-btn" title="Set both flows to 0">Stop all</button>
@@ -206,6 +252,71 @@ const MODES = {
 const history = {};      // fid -> [ {t, p95_ttft, med_ttft, max_ttft, p95_total, med_total, max_total} ]
 let lastOk = 0;
 
+// ----- Schedule mode state -----
+// An authored scenario: ordered segments, each holding a duration (s), a
+// per-tenant QPS target, and an optional `ramp` (ease from the previous
+// segment's rate rather than stepping). `schedRuntime` mirrors the server's
+// live playhead for progress display + the timeline marker.
+let schedule = { loop: true, segments: [] };
+let schedRuntime = { running: false, elapsed: 0, total: 0, segment: -1, cycle: 0 };
+
+// Presets are generated from the configured QPS ceiling so a "burst" reaches the
+// top of the range and the calm baseline sits near the floor, regardless of
+// --max-qps. Each row's `q` array is aligned to tenants sorted by priority (high
+// first), so it stays correct no matter the fairness_ids.
+function buildPresets() {
+  const hi = CONFIG.max_qps;
+  const lo = +(hi * 0.1).toFixed(2);
+  const mid = +(hi * 0.5).toFixed(2);
+  return {
+    "Burstiness": { loop: true, rows: [
+      { d: 8,  q: [lo, lo] },
+      { d: 3,  q: [hi, hi] },
+      { d: 10, q: [lo, lo] },
+      { d: 2,  q: [hi, hi] },
+      { d: 12, q: [lo, lo] },
+    ]},
+    "Ramp up": { loop: false, rows: [
+      { d: 5,  q: [lo, lo] },
+      { d: 20, q: [hi, hi], ramp: true },
+      { d: 10, q: [hi, hi] },
+    ]},
+    "Spike & recover": { loop: false, rows: [
+      { d: 10, q: [mid, mid] },
+      { d: 4,  q: [hi, hi] },
+      { d: 20, q: [mid, mid], ramp: true },
+    ]},
+    "Premium burst": { loop: true, rows: [
+      { d: 10, q: [mid, mid] },
+      { d: 6,  q: [hi, lo] },
+      { d: 10, q: [mid, mid] },
+    ]},
+    "Steady": { loop: true, rows: [
+      { d: 30, q: [mid, mid] },
+    ]},
+  };
+}
+
+// Sorted high-priority-first; used to align preset `q` arrays and order columns.
+function schedTenants() {
+  return [...CONFIG.tenants].sort((a, b) => b.priority - a.priority);
+}
+
+// Turn a preset (generic q[] rows) into a concrete schedule keyed by fairness_id.
+function materializePreset(preset) {
+  const tenants = schedTenants();
+  return {
+    loop: !!preset.loop,
+    segments: preset.rows.map(r => {
+      const rates = {};
+      tenants.forEach((t, i) => {
+        rates[t.fairness_id] = r.q[i] != null ? r.q[i] : (r.q[r.q.length - 1] || 0);
+      });
+      return { duration: r.d, rates, ramp: !!r.ramp };
+    }),
+  };
+}
+
 const METRIC_LABELS = {
   p95_ttft: "P95 time-to-first-token (s)",
   med_ttft: "Median time-to-first-token (s)",
@@ -227,12 +338,35 @@ async function init() {
     values.concurrency[t.fairness_id] = 0;
     values.qps[t.fairness_id] = 0;
   }
+
+  // Seed a default scenario (Burstiness) and register it with the server so the
+  // schedule is ready to run the moment you switch into Schedule mode.
+  const presets = buildPresets();
+  schedule = materializePreset(presets["Burstiness"]);
+  const presetSel = document.getElementById("preset-sel");
+  presetSel.innerHTML = Object.keys(presets).map(n => `<option value="${n}">${n}</option>`).join("");
+  pushSchedule();
+
   applyMode();   // sets control title/hint + builds the sliders for `mode`
 
-  // mode toggle (Concurrency <-> QPS)
+  // mode toggle (Concurrency <-> QPS <-> Schedule)
   document.querySelectorAll("#mode-seg button").forEach(b => {
     b.addEventListener("click", () => setMode(b.dataset.mode));
   });
+
+  // schedule editor controls
+  document.getElementById("preset-load").addEventListener("click", () => {
+    schedule = materializePreset(buildPresets()[presetSel.value]);
+    renderScheduleEditor();
+    pushSchedule();
+    drawTimeline();
+  });
+  document.getElementById("add-seg").addEventListener("click", addSegment);
+  document.getElementById("sched-loop").addEventListener("change", e => {
+    schedule.loop = e.target.checked; pushSchedule(); drawTimeline();
+  });
+  document.getElementById("run-btn").addEventListener("click", runSchedule);
+  document.getElementById("stop-btn").addEventListener("click", stopSchedule);
 
   // metric selector
   document.querySelectorAll("#metric-seg button").forEach(b => {
@@ -254,7 +388,7 @@ async function init() {
     for (const t of CONFIG.tenants) setTarget(t.fairness_id, 0, true);
   });
 
-  window.addEventListener("resize", draw);
+  window.addEventListener("resize", () => { draw(); drawTimeline(); });
   draw();
   poll();
 }
@@ -262,17 +396,35 @@ async function init() {
 // Re-skin the whole control panel for the current `mode`: title, hint, and the
 // per-tenant sliders (bounds/step/value all differ between modes).
 function applyMode() {
-  const m = MODES[mode];
-  document.getElementById("control-title").textContent = m.title;
-  document.getElementById("sub-hint").textContent = m.hint;
+  const isSched = mode === "schedule";
   document.querySelectorAll("#mode-seg button").forEach(b => {
     b.classList.toggle("active", b.dataset.mode === mode);
   });
-  buildTenantControls();
+  document.getElementById("tenants").style.display = isSched ? "none" : "";
+  document.getElementById("schedule-panel").style.display = isSched ? "" : "none";
+  // The "Stop all" zeroing button only makes sense for the slider modes; the
+  // schedule has its own Run/Stop controls.
+  document.getElementById("zero-btn").style.display = isSched ? "none" : "";
+
+  if (isSched) {
+    document.getElementById("control-title").textContent = "QPS Schedule";
+    document.getElementById("sub-hint").textContent =
+      "Build a per-tenant QPS scenario (e.g. burstiness) and run it — watch latency respond.";
+    renderScheduleEditor();
+    drawTimeline();
+  } else {
+    const m = MODES[mode];
+    document.getElementById("control-title").textContent = m.title;
+    document.getElementById("sub-hint").textContent = m.hint;
+    buildTenantControls();
+  }
 }
 
 function setMode(next) {
-  if (next === mode || !MODES[next]) return;
+  if (next === mode || (next !== "schedule" && !MODES[next])) return;
+  // Switching away from schedule mode stops any in-flight playback so its last
+  // rates don't bleed into the slider modes.
+  if (mode === "schedule" && next !== "schedule") stopSchedule();
   mode = next;
   applyMode();
   fetch("/api/mode", {
@@ -342,6 +494,222 @@ async function flushTargets() {
   }
 }
 
+// ---------- schedule editor ----------
+
+// Rebuild the segment table from `schedule`. One row per segment: duration, a
+// QPS cell per tenant, a ramp toggle, and a delete button. Editing any field
+// updates `schedule` and pushes it to the server (debounced).
+function renderScheduleEditor() {
+  const tenants = schedTenants();
+  document.getElementById("sched-loop").checked = !!schedule.loop;
+
+  // header
+  const head = ["#", "Dur (s)", ...tenants.map(t => shortName(t.fairness_id) + " q/s"), "Ramp", ""];
+  let html = "<tr>" + head.map(h => `<th>${h}</th>`).join("") + "</tr>";
+
+  schedule.segments.forEach((seg, i) => {
+    const cells = [];
+    cells.push(`<td>${i + 1}</td>`);
+    cells.push(`<td><input type="number" min="0" step="0.5" value="${seg.duration}" data-seg="${i}" data-field="duration" /></td>`);
+    for (const t of tenants) {
+      const v = seg.rates[t.fairness_id] != null ? seg.rates[t.fairness_id] : 0;
+      cells.push(`<td><input type="number" min="0" max="${CONFIG.max_qps}" step="0.5" value="${v}" data-seg="${i}" data-fid="${t.fairness_id}" /></td>`);
+    }
+    cells.push(`<td><input type="checkbox" data-seg="${i}" data-field="ramp" ${seg.ramp ? "checked" : ""} title="Ease in from the previous segment's rate." /></td>`);
+    cells.push(`<td><button class="del" data-seg="${i}" title="Remove this segment">✕</button></td>`);
+    html += `<tr data-row="${i}">${cells.join("")}</tr>`;
+  });
+
+  const table = document.getElementById("sched-table");
+  table.innerHTML = html;
+
+  table.querySelectorAll("input[type=number]").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const i = +inp.dataset.seg;
+      if (inp.dataset.field === "duration") {
+        schedule.segments[i].duration = Math.max(0, +inp.value || 0);
+      } else if (inp.dataset.fid) {
+        schedule.segments[i].rates[inp.dataset.fid] = Math.max(0, Math.min(+inp.value || 0, CONFIG.max_qps));
+      }
+      pushSchedule();
+      drawTimeline();
+    });
+  });
+  table.querySelectorAll("input[type=checkbox][data-field=ramp]").forEach(cb => {
+    cb.addEventListener("change", () => {
+      schedule.segments[+cb.dataset.seg].ramp = cb.checked;
+      pushSchedule();
+      drawTimeline();
+    });
+  });
+  table.querySelectorAll("button.del").forEach(btn => {
+    btn.addEventListener("click", () => {
+      schedule.segments.splice(+btn.dataset.seg, 1);
+      renderScheduleEditor();
+      pushSchedule();
+      drawTimeline();
+    });
+  });
+}
+
+// Strip a long fairness_id down to something that fits a narrow column header.
+function shortName(fid) { return fid.replace(/-tenant$/, ""); }
+
+function addSegment() {
+  const tenants = schedTenants();
+  const rates = {};
+  // Seed a new segment from the last one (or a sensible default) so adding a row
+  // doesn't drop traffic to zero unexpectedly.
+  const prev = schedule.segments[schedule.segments.length - 1];
+  for (const t of tenants) {
+    rates[t.fairness_id] = prev ? (prev.rates[t.fairness_id] || 0) : +(CONFIG.max_qps * 0.5).toFixed(2);
+  }
+  schedule.segments.push({ duration: prev ? prev.duration : 10, rates, ramp: false });
+  renderScheduleEditor();
+  pushSchedule();
+  drawTimeline();
+}
+
+// Debounced POST of the whole schedule definition to the server.
+function pushSchedule() {
+  if (pushSchedule._t) clearTimeout(pushSchedule._t);
+  pushSchedule._t = setTimeout(() => {
+    fetch("/api/schedule", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(schedule),
+    }).catch(() => {});
+  }, 120);
+}
+
+async function runSchedule() {
+  // Push the latest edits synchronously, then start playback from the top.
+  try {
+    await fetch("/api/schedule", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(schedule),
+    });
+    await fetch("/api/schedule/control", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "start" }),
+    });
+  } catch (e) { /* surfaced via the connection indicator */ }
+}
+
+function stopSchedule() {
+  fetch("/api/schedule/control", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "stop" }),
+  }).catch(() => {});
+}
+
+// Stepped QPS-over-time preview of the scenario, with a playhead while running.
+function drawTimeline() {
+  const canvas = document.getElementById("sched-timeline");
+  if (!canvas || !CONFIG) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || canvas.parentElement.clientWidth || 300;
+  const cssH = 96;
+  canvas.width = cssW * dpr; canvas.height = cssH * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const padL = 8, padR = 8, padT = 8, padB = 16;
+  const W = cssW - padL - padR, H = cssH - padT - padB;
+  const segs = schedule.segments;
+  const total = segs.reduce((a, s) => a + Math.max(0, s.duration), 0);
+
+  if (!segs.length || total <= 0) {
+    ctx.fillStyle = getCSS("--muted"); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = "12px monospace";
+    ctx.fillText("Add segments to shape the scenario.", padL + W / 2, padT + H / 2);
+    return;
+  }
+
+  let yMax = CONFIG.max_qps;
+  for (const s of segs) for (const fid in s.rates) yMax = Math.max(yMax, s.rates[fid]);
+  yMax = yMax || 1;
+
+  // segment boundaries
+  ctx.strokeStyle = getCSS("--line"); ctx.lineWidth = 1;
+  let acc = 0;
+  for (const s of segs) {
+    acc += Math.max(0, s.duration);
+    const x = padL + W * (acc / total);
+    ctx.globalAlpha = 0.4; ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + H); ctx.stroke(); ctx.globalAlpha = 1;
+  }
+
+  const xOf = sec => padL + W * (sec / total);
+  const yOf = q => padT + H * (1 - q / yMax);
+
+  // one stepped (or ramped) line per tenant
+  for (const t of schedTenants()) {
+    const fid = t.fairness_id;
+    ctx.strokeStyle = TENANT_COLORS[fid] || getCSS("--accent");
+    ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath();
+    let cursor = 0, started = false;
+    segs.forEach((s, i) => {
+      const dur = Math.max(0, s.duration);
+      const q = s.rates[fid] || 0;
+      const prevQ = i > 0 ? (segs[i - 1].rates[fid] || 0) : 0;
+      const x0 = xOf(cursor), x1 = xOf(cursor + dur);
+      if (s.ramp) {
+        const yStart = yOf(prevQ), yEnd = yOf(q);
+        if (!started) { ctx.moveTo(x0, yStart); started = true; } else { ctx.lineTo(x0, yStart); }
+        ctx.lineTo(x1, yEnd);
+      } else {
+        const y = yOf(q);
+        if (!started) { ctx.moveTo(x0, y); started = true; } else { ctx.lineTo(x0, y); }
+        ctx.lineTo(x1, y);
+      }
+      cursor += dur;
+    });
+    ctx.stroke();
+  }
+
+  // playhead
+  if (schedRuntime.running && schedRuntime.total > 0) {
+    const x = xOf(Math.min(schedRuntime.elapsed, total));
+    ctx.strokeStyle = getCSS("--accent"); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x, padT - 2); ctx.lineTo(x, padT + H + 2); ctx.stroke();
+  }
+
+  // axis labels
+  ctx.fillStyle = getCSS("--muted"); ctx.font = "10px monospace";
+  ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillText("0s", padL, padT + H + 3);
+  ctx.textAlign = "right";
+  ctx.fillText(total.toFixed(0) + "s", padL + W, padT + H + 3);
+  ctx.textBaseline = "middle"; ctx.textAlign = "left";
+  ctx.fillText(yMax.toFixed(1) + " q/s", padL + 2, padT + 6);
+}
+
+// Reflect the server's playhead in the progress line, table highlight, buttons.
+function updateScheduleUI(sched) {
+  if (!sched) return;
+  schedRuntime = sched;
+  const prog = document.getElementById("sched-progress");
+  const run = document.getElementById("run-btn");
+  const stop = document.getElementById("stop-btn");
+  if (sched.running) {
+    prog.classList.add("running");
+    const seg = sched.segment >= 0 ? (sched.segment + 1) : "—";
+    const loopTxt = sched.loop ? ` · cycle ${sched.cycle + 1}` : "";
+    prog.innerHTML = `▶ Running — segment <b>${seg}/${sched.num_segments}</b> · `
+      + `<b>${sched.elapsed.toFixed(0)}s</b> / ${sched.total.toFixed(0)}s${loopTxt}`;
+    run.disabled = true; stop.disabled = false;
+  } else {
+    prog.classList.remove("running");
+    prog.innerHTML = "Idle — edit the scenario below, then press Run.";
+    run.disabled = false; stop.disabled = true;
+  }
+  // highlight the active row
+  document.querySelectorAll("#sched-table tr[data-row]").forEach(tr => {
+    tr.classList.toggle("active", sched.running && +tr.dataset.row === sched.segment);
+  });
+  drawTimeline();
+}
+
 // ---------- polling ----------
 async function poll() {
   try {
@@ -369,8 +737,9 @@ function onStats(data) {
   banner.className = "banner " + (sat ? "saturated" : "healthy");
   document.getElementById("banner-state").textContent = sat ? "SATURATED" : "HEALTHY";
   // Render the capacity/throughput summary according to the active driving mode.
+  // Schedule mode is open-loop like QPS, so it shares the QPS-style summary.
   const cap = document.getElementById("banner-cap");
-  if (data.mode === "qps") {
+  if (data.mode === "qps" || data.mode === "schedule") {
     cap.innerHTML = `Target <b>${data.total_target_qps.toFixed(1)}/s</b> · achieved `
       + `<b>${data.total_qps.toFixed(1)}/s</b> · in-flight <b>${data.total_active}</b> `
       + `· capacity <b>${data.capacity}</b>`;
@@ -378,6 +747,8 @@ function onStats(data) {
     cap.innerHTML = `Target concurrency <b>${data.total_target}</b> / capacity `
       + `<b>${data.capacity}</b> · in-flight <b>${data.total_active}</b>`;
   }
+
+  if (mode === "schedule") updateScheduleUI(data.schedule);
 
   const now = data.ts_ms;
   for (const t of data.tenants) {
@@ -401,7 +772,9 @@ function latClass(v) { if (v === null || v === undefined) return ""; return v < 
 
 function renderCards(data) {
   const root = document.getElementById("cards");
-  const qps = data.mode === "qps";
+  // Open-loop card layout (achieved/target QPS, bare in-flight) for both QPS and
+  // Schedule modes; concurrency mode shows in-flight against its target.
+  const qps = data.mode === "qps" || data.mode === "schedule";
   const tenants = [...data.tenants].sort((a, b) => b.priority - a.priority);
   root.innerHTML = tenants.map(t => `
     <div class="card">

@@ -5,12 +5,17 @@ Flow Control Demo - Interactive Web UI
 
 A live, browser-driven front end for the load generator in ``client.py``.
 Instead of running through a fixed narrative of stages, this server is driven
-interactively from the browser and supports two live-switchable modes:
+interactively from the browser and supports three live-switchable modes:
 
   * Concurrency (closed loop): hold an adjustable number of requests in flight
     per tenant -- drag the concurrency up and down.
   * QPS (open loop): issue an adjustable number of requests per second per
     tenant regardless of how many are already in flight.
+  * Schedule (open loop): play back a timed, per-tenant QPS *scenario* -- a list
+    of segments (each with a duration and a per-tenant QPS target, optionally
+    ramped) that the server steps through automatically. This lets you author
+    repeatable shapes like "burstiness" (calm baseline punctuated by short
+    spikes) and have the client run them hands-free, optionally on a loop.
 
 Either way you watch latency move over a trailing time window.
 
@@ -166,7 +171,10 @@ async def run_interactive_worker(
         dt = now - last
         last = now
 
-        if control["mode"] == "qps":
+        if control["mode"] in ("qps", "schedule"):
+            # Both open-loop modes spawn from the same per-tenant rate dial. In
+            # "qps" the slider drives it directly; in "schedule" the schedule
+            # driver (run_schedule_driver) rewrites it from the active segment.
             rate = max(0.0, float(control["rates"].get(fid, 0.0)))
             credit += rate * dt
             # Cap pending credit so a stall/idle period can't later unleash a
@@ -189,6 +197,115 @@ async def run_interactive_worker(
             break
         except asyncio.TimeoutError:
             pass
+
+
+# ==============================================================================
+# 3b. SCHEDULE DRIVER (timed QPS scenarios)
+# ==============================================================================
+# A "schedule" is an authored scenario: an ordered list of segments, each with a
+# duration and a per-tenant QPS target. While a schedule is *running*, this
+# single coroutine owns ``control["rates"]`` -- every tick it figures out which
+# segment the playhead is in and writes the corresponding per-tenant rate, which
+# the open-loop workers then spawn against (exactly as if a slider were set
+# there). Segments can optionally *ramp*: instead of stepping to the target QPS,
+# the rate eases linearly from the previous segment's value across the segment.
+# Reaching the end either stops (zeroing all rates) or loops back to the start.
+
+SCHED_TICK = 0.05  # how often the playhead advances / rates are recomputed (20 Hz)
+
+
+def schedule_total(segments: List[dict]) -> float:
+    """Total wall-clock duration of a schedule (sum of segment durations)."""
+    return sum(max(0.0, float(s.get("duration", 0.0))) for s in segments)
+
+
+def segment_at(segments: List[dict], elapsed: float):
+    """Return ``(index, segment_start_elapsed)`` for the segment covering ``elapsed``.
+
+    ``elapsed`` is assumed to be within ``[0, total)``; anything at or past the
+    end clamps to the final segment.
+    """
+    acc = 0.0
+    for i, s in enumerate(segments):
+        d = max(0.0, float(s.get("duration", 0.0)))
+        if elapsed < acc + d:
+            return i, acc
+        acc += d
+    last = len(segments) - 1
+    return last, acc - max(0.0, float(segments[last].get("duration", 0.0)))
+
+
+async def run_schedule_driver(
+    control: dict,
+    tenants: List[Tenant],
+    max_qps: float,
+    stop_event: asyncio.Event,
+) -> None:
+    fids = [t.fairness_id for t in tenants]
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=SCHED_TICK)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        # The driver only owns the rate dials while schedule mode is selected; in
+        # the other modes the sliders are in charge and we keep hands off.
+        if control["mode"] != "schedule":
+            continue
+
+        st = control["sched_state"]
+        sched = control["schedule"]
+        segments = sched.get("segments") or []
+
+        # Idle (not running, or nothing authored): make sure no traffic leaks out
+        # from stale rates left by a previous run or by QPS mode.
+        if not st["running"] or not segments:
+            for fid in fids:
+                control["rates"][fid] = 0.0
+            continue
+
+        total = schedule_total(segments)
+        if total <= 0:
+            st["running"] = False
+            for fid in fids:
+                control["rates"][fid] = 0.0
+            continue
+
+        now = time.monotonic()
+        elapsed = now - st["start"]
+        if elapsed >= total:
+            if sched.get("loop"):
+                # Wrap to the top of the scenario and keep going.
+                st["start"] = now
+                st["cycle"] += 1
+                elapsed = 0.0
+            else:
+                # One-shot scenario finished: stop and drain to zero.
+                st["running"] = False
+                st["elapsed"] = total
+                st["segment"] = len(segments) - 1
+                for fid in fids:
+                    control["rates"][fid] = 0.0
+                continue
+
+        idx, seg_start = segment_at(segments, elapsed)
+        seg = segments[idx]
+        seg_rates = seg.get("rates") or {}
+        ramp = bool(seg.get("ramp"))
+        prev_rates = segments[idx - 1].get("rates", {}) if idx > 0 else {}
+        seg_dur = max(1e-6, float(seg.get("duration", 0.0)))
+        frac = min(1.0, max(0.0, (elapsed - seg_start) / seg_dur)) if ramp else 1.0
+
+        for fid in fids:
+            target = max(0.0, float(seg_rates.get(fid, 0.0)))
+            if ramp:
+                prev = max(0.0, float(prev_rates.get(fid, 0.0)))
+                target = prev + (target - prev) * frac
+            control["rates"][fid] = max(0.0, min(target, float(max_qps)))
+
+        st["elapsed"] = elapsed
+        st["segment"] = idx
 
 
 async def prune_loop(metrics: MetricsCollector, tenants: List[Tenant], max_window: float, stop_event: asyncio.Event) -> None:
@@ -284,9 +401,25 @@ async def handle_stats(request: web.Request) -> web.Response:
 
     capacity = app["args"].capacity
     # Saturation signal depends on the mode. In closed-loop concurrency mode the
-    # target itself can exceed deployment capacity. In open-loop QPS mode the
-    # backpressure shows up as in-flight requests piling past capacity.
-    saturated = (total_active > capacity) if mode == "qps" else (total_target > capacity)
+    # target itself can exceed deployment capacity. In the open-loop modes (QPS
+    # and Schedule) the backpressure shows up as in-flight requests piling past
+    # capacity.
+    open_loop = mode in ("qps", "schedule")
+    saturated = (total_active > capacity) if open_loop else (total_target > capacity)
+
+    # Runtime snapshot of the schedule playhead so the UI can show progress and
+    # animate a marker without re-fetching the schedule definition each poll.
+    st = control["sched_state"]
+    sched = control["schedule"]
+    schedule_info = {
+        "running": bool(st["running"]),
+        "elapsed": float(st["elapsed"]),
+        "total": schedule_total(sched.get("segments") or []),
+        "segment": int(st["segment"]),
+        "cycle": int(st["cycle"]),
+        "loop": bool(sched.get("loop")),
+        "num_segments": len(sched.get("segments") or []),
+    }
     return web.json_response({
         "now": now,
         "ts_ms": int(time.time() * 1000),
@@ -298,6 +431,7 @@ async def handle_stats(request: web.Request) -> web.Response:
         "total_active": total_active,
         "total_qps": total_qps,
         "saturated": saturated,
+        "schedule": schedule_info,
         "tenants": per_tenant,
     })
 
@@ -353,10 +487,99 @@ async def handle_set_mode(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
     mode = body.get("mode")
-    if mode not in ("concurrency", "qps"):
-        return web.json_response({"error": "mode must be 'concurrency' or 'qps'"}, status=400)
+    if mode not in ("concurrency", "qps", "schedule"):
+        return web.json_response({"error": "mode must be 'concurrency', 'qps' or 'schedule'"}, status=400)
+    # Leaving schedule mode while a scenario is playing should stop it so its
+    # last rates don't linger and keep generating traffic under another mode.
+    if mode != "schedule":
+        control["sched_state"]["running"] = False
     control["mode"] = mode
     return web.json_response({"mode": mode})
+
+
+async def handle_set_schedule(request: web.Request) -> web.Response:
+    """Replace the authored schedule (segments + loop flag).
+
+    Body: ``{"segments": [{"duration": <s>, "rates": {<fid>: <qps>}, "ramp": <bool>}, ...],
+              "loop": <bool>}``. Per-tenant rates are clamped to ``--max-qps`` and
+    unknown fairness_ids are dropped; editing the schedule does not start it.
+    """
+    app = request.app
+    control: dict = app["control"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    segments_in = body.get("segments")
+    if not isinstance(segments_in, list):
+        return web.json_response({"error": "segments must be a list"}, status=400)
+
+    valid_fids = set(control["rates"].keys())
+    max_qps = float(app["args"].max_qps)
+    segments: List[dict] = []
+    for seg in segments_in:
+        if not isinstance(seg, dict):
+            return web.json_response({"error": "each segment must be an object"}, status=400)
+        try:
+            duration = max(0.0, float(seg.get("duration", 0.0)))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "segment duration must be a number"}, status=400)
+        rates_in = seg.get("rates") or {}
+        if not isinstance(rates_in, dict):
+            return web.json_response({"error": "segment rates must be an object"}, status=400)
+        rates: Dict[str, float] = {}
+        for fid, v in rates_in.items():
+            if fid not in valid_fids:
+                continue
+            try:
+                rates[fid] = max(0.0, min(float(v), max_qps))
+            except (TypeError, ValueError):
+                rates[fid] = 0.0
+        segments.append({"duration": duration, "rates": rates, "ramp": bool(seg.get("ramp"))})
+
+    control["schedule"]["segments"] = segments
+    control["schedule"]["loop"] = bool(body.get("loop", control["schedule"].get("loop", False)))
+    return web.json_response({
+        "ok": True,
+        "num_segments": len(segments),
+        "loop": control["schedule"]["loop"],
+        "total": schedule_total(segments),
+    })
+
+
+async def handle_schedule_control(request: web.Request) -> web.Response:
+    """Start or stop playback of the authored schedule.
+
+    Body: ``{"action": "start"|"stop"}``. Starting resets the playhead to the top
+    of the scenario; stopping drains all rates to zero on the next driver tick.
+    """
+    app = request.app
+    control: dict = app["control"]
+    st: dict = control["sched_state"]
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+
+    action = body.get("action")
+    if action == "start":
+        if not control["schedule"].get("segments"):
+            return web.json_response({"error": "no schedule segments defined"}, status=400)
+        if schedule_total(control["schedule"]["segments"]) <= 0:
+            return web.json_response({"error": "schedule has zero total duration"}, status=400)
+        st["running"] = True
+        st["start"] = time.monotonic()
+        st["elapsed"] = 0.0
+        st["segment"] = 0
+        st["cycle"] = 0
+        return web.json_response({"running": True})
+    if action == "stop":
+        st["running"] = False
+        for fid in control["rates"]:
+            control["rates"][fid] = 0.0
+        return web.json_response({"running": False})
+    return web.json_response({"error": "action must be 'start' or 'stop'"}, status=400)
 
 
 async def handle_reset(request: web.Request) -> web.Response:
@@ -378,10 +601,22 @@ async def on_startup(app: web.Application) -> None:
     # Shared, mutable control surface driven by the UI. Both the per-tenant
     # concurrency targets and QPS rates live here so switching modes preserves
     # the other mode's dialed-in values; `mode` selects which one is active.
+    #
+    # The schedule sub-surface holds an authored scenario (``schedule``) plus its
+    # live playback state (``sched_state``); the schedule driver reads/writes both
+    # while a scenario is running.
     control: dict = {
         "mode": "concurrency",
         "targets": {t.fairness_id: 0 for t in tenants},
         "rates": {t.fairness_id: 0.0 for t in tenants},
+        "schedule": {"segments": [], "loop": False},
+        "sched_state": {
+            "running": False,
+            "start": 0.0,      # monotonic clock when the current playthrough began
+            "elapsed": 0.0,    # seconds into the current playthrough
+            "segment": -1,     # index of the active segment (-1 = idle)
+            "cycle": 0,        # number of completed loops
+        },
     }
 
     connector = aiohttp.TCPConnector(limit=0)
@@ -407,6 +642,9 @@ async def on_startup(app: web.Application) -> None:
         for t in tenants
     ]
     pruner = asyncio.create_task(prune_loop(metrics, tenants, MAX_BUFFER_WINDOW, stop_event))
+    scheduler = asyncio.create_task(
+        run_schedule_driver(control, tenants, args.max_qps, stop_event)
+    )
 
     app["metrics"] = metrics
     app["tenants"] = tenants
@@ -416,6 +654,7 @@ async def on_startup(app: web.Application) -> None:
     app["stop_event"] = stop_event
     app["workers"] = workers
     app["pruner"] = pruner
+    app["scheduler"] = scheduler
 
 
 async def on_cleanup(app: web.Application) -> None:
@@ -427,10 +666,12 @@ async def on_cleanup(app: web.Application) -> None:
     for w in app["workers"]:
         w.cancel()
     app["pruner"].cancel()
+    app["scheduler"].cancel()
     for task in list(generator.inflight):
         task.cancel()
     await asyncio.gather(
-        *app["workers"], app["pruner"], *generator.inflight, return_exceptions=True
+        *app["workers"], app["pruner"], app["scheduler"], *generator.inflight,
+        return_exceptions=True,
     )
     await session.close()
 
@@ -461,6 +702,8 @@ def main() -> None:
     app.router.add_post("/api/concurrency", handle_set_concurrency)
     app.router.add_post("/api/qps", handle_set_qps)
     app.router.add_post("/api/mode", handle_set_mode)
+    app.router.add_post("/api/schedule", handle_set_schedule)
+    app.router.add_post("/api/schedule/control", handle_schedule_control)
     app.router.add_post("/api/reset", handle_reset)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
