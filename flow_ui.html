@@ -99,18 +99,22 @@
 </style>
 </head>
 <body>
-  <h1>EPP Flow Control — Live Concurrency</h1>
-  <div class="sub">Target <code id="target-url">…</code> · model <code id="model-name">…</code>. Drag the sliders to change how many requests each flow holds in flight, and watch latency move.</div>
+  <h1 id="page-title">EPP Flow Control — Live</h1>
+  <div class="sub">Target <code id="target-url">…</code> · model <code id="model-name">…</code>. <span id="sub-hint">Drag the sliders to change how many requests each flow holds in flight, and watch latency move.</span></div>
 
   <div id="banner" class="banner healthy">
     <span id="banner-state">HEALTHY</span>
-    <span class="cap">Target concurrency <b id="total-target">0</b> / capacity <b id="capacity">0</b> · in-flight <b id="total-active">0</b></span>
+    <span class="cap" id="banner-cap"></span>
   </div>
 
   <div class="grid">
     <!-- LEFT: controls -->
     <div class="panel">
-      <h2>Concurrency</h2>
+      <div class="seg" id="mode-seg" style="margin-bottom:16px; width:100%;">
+        <button data-mode="concurrency" class="active" style="flex:1" title="Closed loop: hold N requests in flight per flow.">Concurrency</button>
+        <button data-mode="qps" style="flex:1" title="Open loop: issue N requests per second per flow, regardless of how many are already in flight.">Queries / sec</button>
+      </div>
+      <h2 id="control-title">Concurrency</h2>
       <div id="tenants"></div>
       <div style="margin-top:18px; display:flex; gap:10px;">
         <button id="reset-btn" title="Clear latency history & counters">Reset metrics</button>
@@ -122,12 +126,12 @@
     <div class="panel">
       <div class="controls">
         <div class="seg" id="metric-seg">
-          <button data-metric="p90_ttft" class="active">P90 TTFT</button>
-          <button data-metric="p95_ttft">P95 TTFT</button>
+          <button data-metric="p95_ttft" class="active">P95 TTFT</button>
           <button data-metric="med_ttft">Median TTFT</button>
-          <button data-metric="p90_total">P90 Total</button>
+          <button data-metric="max_ttft">Max TTFT</button>
           <button data-metric="p95_total">P95 Total</button>
           <button data-metric="med_total">Median Total</button>
+          <button data-metric="max_total">Max latency</button>
         </div>
         <label title="How much time the chart shows on the x-axis. Purely visual — does not change how points are computed.">Chart span
           <select id="span-sel">
@@ -137,7 +141,7 @@
             <option value="300">5m</option>
           </select>
         </label>
-        <label title="Trailing window each plotted point is computed over. Each point aggregates (e.g. P90/median) every request that finished in the preceding N seconds. Smaller = more responsive but noisier; larger = smoother but slower to react.">Avg window
+        <label title="Trailing window each plotted point is computed over. Each point aggregates (e.g. P95/median/max) every request that finished in the preceding N seconds. Smaller = more responsive but noisier; larger = smoother but slower to react.">Avg window
           <select id="window-sel">
             <option value="3">3s</option>
             <option value="5">5s</option>
@@ -173,21 +177,42 @@ const TENANT_COLORS = { "premium-tenant": getCSS("--premium"), "standard-tenant"
 function getCSS(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
 let CONFIG = null;
-let metric = "p90_ttft";
+let mode = "concurrency";   // "concurrency" | "qps"
+// Dialed-in slider values are kept per mode so toggling preserves both.
+const values = { concurrency: {}, qps: {} };
+let metric = "p95_ttft";
 let chartSpan = 60;      // seconds shown on the chart
 let smoothing = 10;      // backend trailing aggregation window (s)
+
+// Per-mode UI knobs: slider bounds/step and how a value is rendered.
+const MODES = {
+  concurrency: {
+    title: "Concurrency",
+    hint: "Drag the sliders to change how many requests each flow holds in flight, and watch latency move.",
+    max: () => CONFIG.max_concurrency,
+    step: 1,
+    fmt: (v) => String(Math.round(v)),
+  },
+  qps: {
+    title: "Queries / sec",
+    hint: "Drag the sliders to set how many requests per second each flow issues (open loop), and watch latency move.",
+    max: () => CONFIG.max_qps,
+    step: 0.5,
+    fmt: (v) => (+v).toFixed(1) + "/s",
+  },
+};
 // Per-tenant rolling history of { t (ms), value } for the selected metric is
 // kept separately per metric key so switching metrics keeps prior data.
-const history = {};      // fid -> [ {t, p90_ttft, med_ttft, p90_total, med_total} ]
+const history = {};      // fid -> [ {t, p95_ttft, med_ttft, max_ttft, p95_total, med_total, max_total} ]
 let lastOk = 0;
 
 const METRIC_LABELS = {
-  p90_ttft: "P90 time-to-first-token (s)",
   p95_ttft: "P95 time-to-first-token (s)",
   med_ttft: "Median time-to-first-token (s)",
-  p90_total: "P90 total latency (s)",
+  max_ttft: "Max time-to-first-token (s)",
   p95_total: "P95 total latency (s)",
   med_total: "Median total latency (s)",
+  max_total: "Max total latency (s)",
 };
 
 // ---------- init ----------
@@ -195,10 +220,19 @@ async function init() {
   CONFIG = await fetch("/api/config").then(r => r.json());
   document.getElementById("target-url").textContent = CONFIG.url;
   document.getElementById("model-name").textContent = CONFIG.model;
-  document.getElementById("capacity").textContent = CONFIG.capacity;
+  mode = CONFIG.mode || "concurrency";
 
-  buildTenantControls();
-  for (const t of CONFIG.tenants) history[t.fairness_id] = [];
+  for (const t of CONFIG.tenants) {
+    history[t.fairness_id] = [];
+    values.concurrency[t.fairness_id] = 0;
+    values.qps[t.fairness_id] = 0;
+  }
+  applyMode();   // sets control title/hint + builds the sliders for `mode`
+
+  // mode toggle (Concurrency <-> QPS)
+  document.querySelectorAll("#mode-seg button").forEach(b => {
+    b.addEventListener("click", () => setMode(b.dataset.mode));
+  });
 
   // metric selector
   document.querySelectorAll("#metric-seg button").forEach(b => {
@@ -217,7 +251,7 @@ async function init() {
     draw();
   });
   document.getElementById("zero-btn").addEventListener("click", () => {
-    for (const t of CONFIG.tenants) setConcurrency(t.fairness_id, 0, true);
+    for (const t of CONFIG.tenants) setTarget(t.fairness_id, 0, true);
   });
 
   window.addEventListener("resize", draw);
@@ -225,12 +259,38 @@ async function init() {
   poll();
 }
 
+// Re-skin the whole control panel for the current `mode`: title, hint, and the
+// per-tenant sliders (bounds/step/value all differ between modes).
+function applyMode() {
+  const m = MODES[mode];
+  document.getElementById("control-title").textContent = m.title;
+  document.getElementById("sub-hint").textContent = m.hint;
+  document.querySelectorAll("#mode-seg button").forEach(b => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+  });
+  buildTenantControls();
+}
+
+function setMode(next) {
+  if (next === mode || !MODES[next]) return;
+  mode = next;
+  applyMode();
+  fetch("/api/mode", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  }).catch(() => {});
+}
+
 function buildTenantControls() {
+  const m = MODES[mode];
+  const max = m.max();
   const root = document.getElementById("tenants");
+  root.innerHTML = "";
   // premium first (higher priority on top, like the CLI dashboard)
   const tenants = [...CONFIG.tenants].sort((a, b) => b.priority - a.priority);
   for (const t of tenants) {
     const cls = t.fairness_id === "premium-tenant" ? "premium" : "standard";
+    const cur = values[mode][t.fairness_id] || 0;
     const el = document.createElement("div");
     el.className = "tenant " + cls;
     el.innerHTML = `
@@ -239,39 +299,43 @@ function buildTenantControls() {
           <span class="name">${t.fairness_id}</span>
           <span class="obj">· ${t.objective} · pri ${t.priority}</span>
         </div>
-        <span class="val" id="val-${t.fairness_id}">0</span>
+        <span class="val" id="val-${t.fairness_id}">${m.fmt(cur)}</span>
       </div>
-      <input type="range" min="0" max="${CONFIG.max_concurrency}" step="1" value="0"
+      <input type="range" min="0" max="${max}" step="${m.step}" value="${cur}"
              id="slider-${t.fairness_id}" />
-      <div class="ticks"><span>0</span><span>${Math.round(CONFIG.max_concurrency/2)}</span><span>${CONFIG.max_concurrency}</span></div>
+      <div class="ticks"><span>0</span><span>${m.fmt(max/2)}</span><span>${m.fmt(max)}</span></div>
     `;
     root.appendChild(el);
     const slider = el.querySelector("input");
     slider.addEventListener("input", () => {
-      document.getElementById("val-" + t.fairness_id).textContent = slider.value;
-      setConcurrency(t.fairness_id, +slider.value, false);
+      document.getElementById("val-" + t.fairness_id).textContent = m.fmt(+slider.value);
+      setTarget(t.fairness_id, +slider.value, false);
     });
   }
 }
 
-// debounce concurrency posts a touch so dragging doesn't flood the server
+// Post the dialed-in value to the endpoint for the current mode, debounced a
+// touch so dragging doesn't flood the server.
 const pending = {};
-function setConcurrency(fid, target, immediate) {
+function setTarget(fid, target, immediate) {
+  values[mode][fid] = target;
   if (immediate) {
     const s = document.getElementById("slider-" + fid);
     if (s) s.value = target;
-    document.getElementById("val-" + fid).textContent = target;
+    const v = document.getElementById("val-" + fid);
+    if (v) v.textContent = MODES[mode].fmt(target);
   }
   pending[fid] = target;
-  if (setConcurrency._timer) return;
-  setConcurrency._timer = setTimeout(flushConcurrency, 40);
+  if (setTarget._timer) return;
+  setTarget._timer = setTimeout(flushTargets, 40);
 }
-async function flushConcurrency() {
-  setConcurrency._timer = null;
+async function flushTargets() {
+  setTarget._timer = null;
+  const endpoint = mode === "qps" ? "/api/qps" : "/api/concurrency";
   const updates = { ...pending };
   for (const k in pending) delete pending[k];
   for (const fid in updates) {
-    fetch("/api/concurrency", {
+    fetch(endpoint, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ fairness_id: fid, target: updates[fid] }),
     }).catch(() => {});
@@ -304,17 +368,24 @@ function onStats(data) {
   const sat = data.saturated;
   banner.className = "banner " + (sat ? "saturated" : "healthy");
   document.getElementById("banner-state").textContent = sat ? "SATURATED" : "HEALTHY";
-  document.getElementById("total-target").textContent = data.total_target;
-  document.getElementById("total-active").textContent = data.total_active;
-  document.getElementById("capacity").textContent = data.capacity;
+  // Render the capacity/throughput summary according to the active driving mode.
+  const cap = document.getElementById("banner-cap");
+  if (data.mode === "qps") {
+    cap.innerHTML = `Target <b>${data.total_target_qps.toFixed(1)}/s</b> · achieved `
+      + `<b>${data.total_qps.toFixed(1)}/s</b> · in-flight <b>${data.total_active}</b> `
+      + `· capacity <b>${data.capacity}</b>`;
+  } else {
+    cap.innerHTML = `Target concurrency <b>${data.total_target}</b> / capacity `
+      + `<b>${data.capacity}</b> · in-flight <b>${data.total_active}</b>`;
+  }
 
   const now = data.ts_ms;
   for (const t of data.tenants) {
     const h = history[t.fairness_id] || (history[t.fairness_id] = []);
     h.push({
       t: now,
-      p90_ttft: t.p90_ttft, p95_ttft: t.p95_ttft, med_ttft: t.med_ttft,
-      p90_total: t.p90_total, p95_total: t.p95_total, med_total: t.med_total,
+      p95_ttft: t.p95_ttft, med_ttft: t.med_ttft, max_ttft: t.max_ttft,
+      p95_total: t.p95_total, med_total: t.med_total, max_total: t.max_total,
     });
     // prune to the largest span we might show (5m) plus a little slack
     const cutoff = now - 320000;
@@ -330,19 +401,20 @@ function latClass(v) { if (v === null || v === undefined) return ""; return v < 
 
 function renderCards(data) {
   const root = document.getElementById("cards");
+  const qps = data.mode === "qps";
   const tenants = [...data.tenants].sort((a, b) => b.priority - a.priority);
   root.innerHTML = tenants.map(t => `
     <div class="card">
       <div class="ttl"><span class="dot" style="background:${TENANT_COLORS[t.fairness_id]}"></span>${t.fairness_id}</div>
       <div class="metrics">
         <div class="m"><b>med TTFT</b><span class="${latClass(t.med_ttft)}">${fmt(t.med_ttft,"s")}</span></div>
-        <div class="m"><b>p90 TTFT</b><span class="${latClass(t.p90_ttft)}">${fmt(t.p90_ttft,"s")}</span></div>
         <div class="m"><b>p95 TTFT</b><span class="${latClass(t.p95_ttft)}">${fmt(t.p95_ttft,"s")}</span></div>
+        <div class="m"><b>max TTFT</b><span class="${latClass(t.max_ttft)}">${fmt(t.max_ttft,"s")}</span></div>
         <div class="m"><b>med total</b><span>${fmt(t.med_total,"s")}</span></div>
-        <div class="m"><b>p90 total</b><span>${fmt(t.p90_total,"s")}</span></div>
         <div class="m"><b>p95 total</b><span>${fmt(t.p95_total,"s")}</span></div>
-        <div class="m"><b>in-flight</b><span>${t.active} / ${t.target}</span></div>
-        <div class="m"><b>QPS</b><span>${t.qps.toFixed(1)}</span></div>
+        <div class="m"><b>max total</b><span>${fmt(t.max_total,"s")}</span></div>
+        <div class="m"><b>in-flight</b><span>${qps ? t.active : t.active + " / " + t.target}</span></div>
+        <div class="m"><b>QPS</b><span>${qps ? t.qps.toFixed(1) + " / " + t.target_qps.toFixed(1) : t.qps.toFixed(1)}</span></div>
       </div>
       <div class="codes">
         <span class="ok">200: ${t.s_200}</span>
