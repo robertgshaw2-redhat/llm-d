@@ -447,7 +447,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0", help="Web UI bind host.")
     parser.add_argument("--port", type=int, default=8080, help="Web UI port.")
     parser.add_argument("--max-concurrency", dest="max_concurrency", type=int, default=32, help="Upper bound for the concurrency sliders.")
-    parser.add_argument("--max-qps", dest="max_qps", type=float, default=5.0, help="Upper bound for the QPS sliders.")
+    parser.add_argument("--max-qps", dest="max_qps", type=float, default=2.0, help="Upper bound for the QPS sliders.")
     return parser.parse_args()
 
 

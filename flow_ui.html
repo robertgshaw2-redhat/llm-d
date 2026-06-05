@@ -197,7 +197,7 @@ const MODES = {
     title: "Queries / sec",
     hint: "Drag the sliders to set how many requests per second each flow issues (open loop), and watch latency move.",
     max: () => CONFIG.max_qps,
-    step: 0.5,
+    step: 0.1,
     fmt: (v) => (+v).toFixed(1) + "/s",
   },
 };
