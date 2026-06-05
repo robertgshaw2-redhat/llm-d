@@ -23,6 +23,11 @@ image       := env_var_or_default("CLIENT_IMAGE", "python:3.12-slim")
 pod         := "epp-client"
 # Path to the load client on the host.
 client_py   := justfile_directory() / "client.py"
+# Path to the interactive web UI server + page on the host.
+flow_ui_py  := justfile_directory() / "flow_ui_server.py"
+flow_ui_html := justfile_directory() / "flow_ui.html"
+# Local port the web UI is port-forwarded to (open http://localhost:<ui_port>).
+ui_port     := env_var_or_default("UI_PORT", "8080")
 
 # Show available recipes.
 default:
@@ -67,6 +72,59 @@ client *ARGS:
     # Run the client, injecting the EPP clusterIP as the EPP_IP env var.
     kubectl exec -it {{pod}} -n {{namespace}} -- \
         env EPP_IP="${IP}" python3 /tmp/client.py --model {{model}} {{ARGS}}
+
+# Launch the interactive web UI (flow_ui_server.py) in an in-cluster pod and
+# port-forward it to localhost. Open http://localhost:{{ui_port}} once it's up.
+# Extra args are passed straight through to flow_ui_server.py (e.g. --capacity 32).
+flow-ui *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    IP=$(kubectl get service {{epp_service}} -n {{namespace}} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+    if [ -z "${IP}" ]; then
+        echo "ERROR: could not resolve clusterIP for service '{{epp_service}}' in namespace '{{namespace}}'." >&2
+        echo "       Is the router deployed? Check: kubectl get svc -n {{namespace}}" >&2
+        exit 1
+    fi
+    echo "EPP service {{epp_service}} clusterIP: ${IP}"
+
+    # Always clean up the pod, even on Ctrl+C / failure.
+    cleanup() {
+        kubectl delete pod {{pod}} -n {{namespace}} --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    # Start a long-lived pod we can copy into and exec against.
+    kubectl run {{pod}} -n {{namespace}} --image={{image}} --restart=Never \
+        --command -- sleep infinity
+    kubectl wait --for=condition=Ready pod/{{pod}} -n {{namespace}} --timeout=120s
+
+    # Copy the server, the UI page and the load engine into the pod. The server
+    # reads flow_ui.html from its own directory and imports client.py, so all
+    # three must sit side by side in /tmp.
+    kubectl exec -i {{pod}} -n {{namespace}} -- sh -c 'cat > /tmp/flow_ui_server.py' < {{flow_ui_py}}
+    kubectl exec -i {{pod}} -n {{namespace}} -- sh -c 'cat > /tmp/flow_ui.html' < {{flow_ui_html}}
+    kubectl exec -i {{pod}} -n {{namespace}} -- sh -c 'cat > /tmp/client.py' < {{client_py}}
+
+    # Install the only runtime dependency (requires pod egress to PyPI).
+    kubectl exec -i {{pod}} -n {{namespace}} -- pip install --quiet --no-cache-dir aiohttp
+
+    # Start the UI server detached inside the pod, listening on 8080. nohup +
+    # redirect lets the exec session return while the server keeps running
+    # (reparented to the pod's init).
+    kubectl exec -i {{pod}} -n {{namespace}} -- sh -c \
+        'cd /tmp && nohup env EPP_IP="'"${IP}"'" python3 flow_ui_server.py --model {{model}} {{ARGS}} > /tmp/flow_ui.log 2>&1 &'
+
+    # Give it a moment to bind, then surface any startup errors.
+    sleep 3
+    kubectl exec -i {{pod}} -n {{namespace}} -- cat /tmp/flow_ui.log || true
+
+    echo
+    echo ">>> Web UI ready. Open http://localhost:{{ui_port}}  (Ctrl+C to stop and clean up the pod)"
+    echo
+
+    # Foreground port-forward; Ctrl+C here triggers the cleanup trap above.
+    kubectl port-forward pod/{{pod}} -n {{namespace}} {{ui_port}}:8080
 
 exec:
     kubectl exec -it {{pod}} -n {{namespace}} -- /bin/bash
