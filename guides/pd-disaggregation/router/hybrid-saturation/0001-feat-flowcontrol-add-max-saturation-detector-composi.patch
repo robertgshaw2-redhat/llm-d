@@ -1,0 +1,454 @@
+From c9a70f8845ef746f80940b2448fa8228ce8859ff Mon Sep 17 00:00:00 2001
+From: Robert Shaw <robertgshaw2@gmail.com>
+Date: Fri, 11 Sep 2026 19:31:00 +0000
+Subject: [PATCH] feat(flowcontrol): add max-saturation-detector composite
+ plugin
+
+Add a composite saturation detector that combines the signals of other
+saturation detector plugins, reporting pool saturation as the maximum
+across its children. This lets flow control gate dispatch on multiple
+independent load signals at once - e.g. in-flight concurrency
+(concurrency-detector) and scraped queue depth / KV utilization
+(utilization-detector) - instead of choosing a single detector.
+
+The plugin resolves its children by name from the plugin handle, so
+child detectors must be declared before the composite in the plugins
+list. It deliberately implements neither the scheduling Filter
+extension point (per-endpoint filtering stays with the children, listed
+in profiles explicitly) nor ConsumerPlugin (children are configured
+plugins whose data dependencies the framework validates directly).
+
+Each child's signal is also exported through a new
+flow_control_detector_saturation gauge, labeled by detector reference
+name, so operators can tell which signal is driving
+flow_control_pool_saturation.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HQoBZWySXyubPdE3crXjzs
+---
+ cmd/epp/runner/runner.go                      |   2 +
+ .../saturationdetector/composite/detector.go  | 158 ++++++++++++++++
+ .../composite/detector_test.go                | 170 ++++++++++++++++++
+ pkg/epp/metrics/llm_d_router_metrics.go       |  15 ++
+ pkg/epp/metrics/metrics.go                    |   8 +
+ 5 files changed, 353 insertions(+)
+
+diff --git a/cmd/epp/runner/runner.go b/cmd/epp/runner/runner.go
+index 41cc976a..3f756bd8 100644
+--- a/cmd/epp/runner/runner.go
++++ b/cmd/epp/runner/runner.go
+@@ -86,6 +86,7 @@ import (
+ 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
+ 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
+ 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
+ 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
+ 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
+ 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+@@ -728,6 +729,7 @@ func (r *Runner) registerInTreePlugins() {
+ 	// Beta
+ 	fwkplugin.Register(concurrency.ConcurrencyDetectorType, fwkplugin.StabilityBeta, concurrency.ConcurrencyDetectorFactory)
+ 	fwkplugin.Register(utilization.UtilizationDetectorType, fwkplugin.StabilityBeta, utilization.UtilizationDetectorFactory)
++	fwkplugin.Register(composite.MaxSaturationDetectorType, fwkplugin.StabilityBeta, composite.MaxSaturationDetectorFactory)
+ 
+ 	// register discovery plugins
+ 	// Beta
+diff --git a/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite/detector.go b/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite/detector.go
+new file mode 100644
+index 00000000..ea9e7c5d
+--- /dev/null
++++ b/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite/detector.go
+@@ -0,0 +1,158 @@
++/*
++Copyright 2025 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++// Package composite implements a saturation detector that combines the signals of other
++// saturation detector plugins. The pool saturation it reports is the maximum across its
++// children, so flow control gates dispatch on whichever independent load signal (for
++// example in-flight concurrency or scraped queue depth) is the most constrained.
++//
++// The composite deliberately does not implement the scheduling Filter extension point:
++// the config loader only auto-injects a gating detector into scheduling profiles when it
++// implements Filter, so per-endpoint filtering stays with the child detectors, which are
++// listed in the profiles explicitly.
++package composite
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++
++	"github.com/go-logr/logr"
++	"sigs.k8s.io/controller-runtime/pkg/log"
++
++	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
++	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
++	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
++)
++
++const (
++	// MaxSaturationDetectorType is the unique identifier for this plugin.
++	MaxSaturationDetectorType = "max-saturation-detector"
++)
++
++// parameters is the external configuration schema for the composite detector.
++type parameters struct {
++	// Detectors names the child saturation detector plugins to combine. Each entry must
++	// reference a plugin that appears earlier in the plugins list (so it is already
++	// instantiated when this factory runs) and that implements
++	// flowcontrol.SaturationDetector.
++	Detectors []string `json:"detectors"`
++}
++
++// MaxSaturationDetectorFactory instantiates the detector plugin using the provided JSON parameters.
++func MaxSaturationDetectorFactory(
++	name string,
++	params *json.Decoder,
++	handle fwkplugin.Handle,
++) (fwkplugin.Plugin, error) {
++	if handle == nil {
++		return nil, errors.New("plugin handle is required")
++	}
++	var cfg parameters
++	if params != nil {
++		if err := params.Decode(&cfg); err != nil {
++			return nil, fmt.Errorf("failed to unmarshal max saturation detector config: %w", err)
++		}
++	}
++	if len(cfg.Detectors) == 0 {
++		return nil, errors.New("max saturation detector requires at least one entry in detectors")
++	}
++
++	children := make([]flowcontrol.SaturationDetector, 0, len(cfg.Detectors))
++	seen := make(map[string]struct{}, len(cfg.Detectors))
++	for _, childName := range cfg.Detectors {
++		if _, dup := seen[childName]; dup {
++			return nil, fmt.Errorf("duplicate entry in detectors: %s", childName)
++		}
++		seen[childName] = struct{}{}
++
++		p := handle.Plugin(childName)
++		if p == nil {
++			return nil, fmt.Errorf(
++				"detectors plugin not found: %s (child detectors must be declared before %s in the plugins list)",
++				childName, MaxSaturationDetectorType)
++		}
++		child, ok := p.(flowcontrol.SaturationDetector)
++		if !ok {
++			return nil, fmt.Errorf("plugin %s does not implement flowcontrol.SaturationDetector", childName)
++		}
++		children = append(children, child)
++	}
++
++	return newDetector(name, cfg.Detectors, children, log.FromContext(handle.Context())), nil
++}
++
++// The composite deliberately does not implement fwkplugin.ConsumerPlugin. Its children are
++// themselves plugins in the configuration, so the framework already validates and orders their
++// data dependencies directly; re-declaring the union here would additionally subject those keys
++// to the data graph's layer-order check, which places a plugin implementing no scheduling or
++// requestcontrol interface before every producer and rejects the configuration.
++var _ flowcontrol.SaturationDetector = &detector{}
++
++// detector combines child saturation detectors, reporting the maximum of their signals.
++type detector struct {
++	typedName fwkplugin.TypedName
++	children  []flowcontrol.SaturationDetector
++	// childLabels are the metric label values for the per-child saturation gauge,
++	// index-aligned with children: the reference name from the configuration.
++	childLabels []string
++}
++
++// newDetector creates a new instance of the composite max saturation detector.
++// childNames must be index-aligned with children.
++func newDetector(
++	name string,
++	childNames []string,
++	children []flowcontrol.SaturationDetector,
++	logger logr.Logger,
++) *detector {
++	typedName := fwkplugin.TypedName{
++		Type: MaxSaturationDetectorType,
++		Name: name,
++	}
++
++	logger.WithName(typedName.String()).V(logutil.DEFAULT).Info("Creating new MaxSaturationDetector",
++		"detectors", childNames)
++
++	return &detector{
++		typedName:   typedName,
++		children:    children,
++		childLabels: childNames,
++	}
++}
++
++// TypedName returns the type and name tuple of this plugin instance.
++func (d *detector) TypedName() fwkplugin.TypedName {
++	return d.typedName
++}
++
++// Saturation returns the maximum saturation reported by the child detectors for the given
++// candidate endpoints, so the pool gates as saturated when any single signal is exhausted.
++// Each child's value is also exported through the per-detector saturation gauge, letting
++// operators tell which signal is driving the combined value.
++func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
++	var maxSat float64
++	for i, child := range d.children {
++		sat := child.Saturation(ctx, endpoints)
++		metrics.RecordFlowControlDetectorSaturation(d.childLabels[i], sat)
++		if i == 0 || sat > maxSat {
++			maxSat = sat
++		}
++	}
++	return maxSat
++}
+diff --git a/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite/detector_test.go b/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite/detector_test.go
+new file mode 100644
+index 00000000..01bedb6d
+--- /dev/null
++++ b/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite/detector_test.go
+@@ -0,0 +1,170 @@
++/*
++Copyright 2025 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package composite
++
++import (
++	"context"
++	"testing"
++
++	"github.com/prometheus/client_golang/prometheus"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++
++	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
++	fcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
++	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
++	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
++)
++
++// notADetector is a plugin that does not implement flowcontrol.SaturationDetector.
++type notADetector struct{}
++
++func (n *notADetector) TypedName() fwkplugin.TypedName {
++	return fwkplugin.TypedName{Type: "not-a-detector", Name: "not-a-detector"}
++}
++
++func newHandle(t *testing.T) fwkplugin.Handle {
++	t.Helper()
++	return fwkplugin.NewEppHandle(context.Background(), nil,
++		fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
++}
++
++func mockDetector(name string, saturation float64) *fcmocks.MockSaturationDetector {
++	return &fcmocks.MockSaturationDetector{
++		TypedNameV:  fwkplugin.TypedName{Type: "mock-detector", Name: name},
++		SaturationV: saturation,
++	}
++}
++
++func TestFactory_ReturnsMaxOfChildren(t *testing.T) {
++	handle := newHandle(t)
++	handle.AddPlugin("low", mockDetector("low", 0.25))
++	handle.AddPlugin("high", mockDetector("high", 0.75))
++
++	p, err := MaxSaturationDetectorFactory("combined",
++		fwkplugin.StrictDecoder([]byte(`{"detectors":["low","high"]}`)), handle)
++	require.NoError(t, err)
++
++	d, ok := p.(flowcontrol.SaturationDetector)
++	require.True(t, ok)
++	assert.Equal(t, MaxSaturationDetectorType, d.TypedName().Type)
++	assert.Equal(t, "combined", d.TypedName().Name)
++	assert.InDelta(t, 0.75, d.Saturation(context.Background(), nil), 1e-9)
++}
++
++func TestFactory_SingleChildPassesThrough(t *testing.T) {
++	handle := newHandle(t)
++	handle.AddPlugin("only", mockDetector("only", 1.5))
++
++	p, err := MaxSaturationDetectorFactory("combined",
++		fwkplugin.StrictDecoder([]byte(`{"detectors":["only"]}`)), handle)
++	require.NoError(t, err)
++
++	d := p.(flowcontrol.SaturationDetector)
++	// Values above 1.0 (oversubscription magnitude) must pass through unclamped.
++	assert.InDelta(t, 1.5, d.Saturation(context.Background(), nil), 1e-9)
++}
++
++func TestFactory_Errors(t *testing.T) {
++	tests := []struct {
++		name    string
++		params  string
++		setup   func(h fwkplugin.Handle)
++		wantErr string
++	}{
++		{
++			name:    "no detectors configured",
++			params:  `{}`,
++			wantErr: "at least one entry",
++		},
++		{
++			name:    "empty detectors list",
++			params:  `{"detectors":[]}`,
++			wantErr: "at least one entry",
++		},
++		{
++			name:    "missing child",
++			params:  `{"detectors":["absent"]}`,
++			wantErr: "plugin not found: absent",
++		},
++		{
++			name:   "child of wrong type",
++			params: `{"detectors":["wrong"]}`,
++			setup: func(h fwkplugin.Handle) {
++				h.AddPlugin("wrong", &notADetector{})
++			},
++			wantErr: "does not implement flowcontrol.SaturationDetector",
++		},
++		{
++			name:   "duplicate child",
++			params: `{"detectors":["a","a"]}`,
++			setup: func(h fwkplugin.Handle) {
++				h.AddPlugin("a", mockDetector("a", 0.5))
++			},
++			wantErr: "duplicate entry",
++		},
++		{
++			name:    "malformed parameters",
++			params:  `{"detectors":"not-a-list"}`,
++			wantErr: "failed to unmarshal",
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			handle := newHandle(t)
++			if tt.setup != nil {
++				tt.setup(handle)
++			}
++			_, err := MaxSaturationDetectorFactory("combined",
++				fwkplugin.StrictDecoder([]byte(tt.params)), handle)
++			require.Error(t, err)
++			assert.Contains(t, err.Error(), tt.wantErr)
++		})
++	}
++}
++
++func TestFactory_NilHandle(t *testing.T) {
++	_, err := MaxSaturationDetectorFactory("combined",
++		fwkplugin.StrictDecoder([]byte(`{"detectors":["a"]}`)), nil)
++	require.Error(t, err)
++	assert.Contains(t, err.Error(), "plugin handle is required")
++}
++
++// TestNotAConsumerOrSchedulingPlugin pins two deliberate design choices:
++//
++//   - The composite must not implement ConsumerPlugin. Its children are plugins in the
++//     configuration themselves, so their data dependencies are validated directly; declaring
++//     the union here would put the keys through the data graph's layer-order check, which
++//     places a plugin with no scheduling or requestcontrol interface before every producer
++//     and rejects otherwise valid configurations.
++//   - The composite must not implement the scheduling Filter extension point: the config
++//     loader only auto-injects a gating detector into scheduling profiles when it implements
++//     Filter, and per-endpoint filtering belongs to the children, listed in profiles
++//     explicitly.
++func TestNotAConsumerOrSchedulingPlugin(t *testing.T) {
++	handle := newHandle(t)
++	handle.AddPlugin("only", mockDetector("only", 0.5))
++
++	p, err := MaxSaturationDetectorFactory("combined",
++		fwkplugin.StrictDecoder([]byte(`{"detectors":["only"]}`)), handle)
++	require.NoError(t, err)
++
++	_, isConsumer := p.(fwkplugin.ConsumerPlugin)
++	assert.False(t, isConsumer, "composite must not declare data dependencies of its own")
++	_, isFilter := p.(fwksched.Filter)
++	assert.False(t, isFilter, "composite must not be auto-injected into scheduling profiles as a filter")
++}
+diff --git a/pkg/epp/metrics/llm_d_router_metrics.go b/pkg/epp/metrics/llm_d_router_metrics.go
+index 5605acfa..03104502 100644
+--- a/pkg/epp/metrics/llm_d_router_metrics.go
++++ b/pkg/epp/metrics/llm_d_router_metrics.go
+@@ -412,6 +412,21 @@ var (
+ 		[]string{"detector"},
+ 	)
+ 
++	llmdFlowControlDetectorSaturation = prometheus.NewGaugeVec(
++		prometheus.GaugeOpts{
++			Subsystem: LLMDRouterEndpointPickerSubsystem,
++			Name:      "flow_control_detector_saturation",
++			Help: metricsutil.HelpMsgWithStability(
++				"Saturation signal reported by an individual saturation detector, labeled by the detector reference "+
++					"name. Recorded by the max composite saturation detector for each of its children on every "+
++					"evaluation, so operators can tell which signal (e.g. concurrency vs queue depth) is driving "+
++					"flow_control_pool_saturation. Like flow_control_stale_endpoints, this gauge carries no stage "+
++					"label and is written on every detector call, so it reflects the most recently evaluated stage.",
++				compbasemetrics.ALPHA),
++		},
++		[]string{"detector"},
++	)
++
+ 	llmdFlowControlCapacityUtilizationRequests = prometheus.NewGaugeVec(
+ 		prometheus.GaugeOpts{
+ 			Subsystem: LLMDRouterEndpointPickerSubsystem,
+diff --git a/pkg/epp/metrics/metrics.go b/pkg/epp/metrics/metrics.go
+index 66bcd5f3..be28bc47 100644
+--- a/pkg/epp/metrics/metrics.go
++++ b/pkg/epp/metrics/metrics.go
+@@ -279,6 +279,7 @@ func Register(customCollectors ...prometheus.Collector) {
+ 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
+ 		// llm_d_epp prefix only.
+ 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
++		metrics.Registry.MustRegister(llmdFlowControlDetectorSaturation)
+ 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
+ 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
+ 		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationRequests)
+@@ -346,6 +347,7 @@ func Reset() {
+ 	flowControlPoolSaturation.Reset()
+ 	llmdFlowControlPoolSaturation.Reset()
+ 	llmdFlowControlStaleEndpoints.Reset()
++	llmdFlowControlDetectorSaturation.Reset()
+ 	llmdFlowControlCapacityUtilizationRequests.Reset()
+ 	llmdFlowControlCapacityUtilizationBytes.Reset()
+ 	llmdFlowControlGlobalCapacityUtilizationRequests.Reset()
+@@ -737,6 +739,12 @@ func RecordFlowControlStaleEndpoints(detector string, count int) {
+ 	llmdFlowControlStaleEndpoints.WithLabelValues(detector).Set(float64(count))
+ }
+ 
++// RecordFlowControlDetectorSaturation records the saturation signal reported by a single
++// saturation detector instance, as of the most recent evaluation.
++func RecordFlowControlDetectorSaturation(detector string, saturation float64) {
++	llmdFlowControlDetectorSaturation.WithLabelValues(detector).Set(saturation)
++}
++
+ // RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio
+ // (occupancy/effective capacity, 0.0-1.0) for a single priority band. The band denominator falls back to a default
+ // when unconfigured, so every configured band reports a series.
